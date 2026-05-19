@@ -1,0 +1,59 @@
+
+import React from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
+import { useNavigate } from 'react-router-dom';
+import { db } from '../db';
+import { Button } from '../components/ui/Button';
+import { Spinner } from '../components/ui/Spinner';
+import { Plus } from 'lucide-react';
+import { ProjectCard } from '../components/ProjectCard';
+import { ProjectEmptyState } from '../components/ProjectEmptyState';
+
+export default function Home() {
+  const navigate = useNavigate();
+  const projects = useLiveQuery(() => db.projects.orderBy('created_at').reverse().toArray());
+
+  const handleDelete = async (id: number) => {
+    if (confirm('آیا از حذف این پروژه و تمام داده‌های آن مطمئن هستید؟')) {
+      await db.transaction('rw', [db.projects, db.pages, db.weights, db.results], async () => {
+        await db.projects.delete(id);
+        await db.pages.where('project_id').equals(id).delete();
+        await db.weights.where('project_id').equals(id).delete();
+        await db.results.where('project_id').equals(id).delete();
+      });
+    }
+  };
+
+  if (projects === undefined) return <div className="flex justify-center py-20"><Spinner size="lg" /></div>;
+
+  return (
+    <div className="space-y-8 animate-in fade-in duration-500">
+      <div className="flex justify-between items-center">
+        <div>
+          <h1 className="text-3xl font-bold text-gray-900">پروژه‌های من</h1>
+          <p className="text-gray-500 mt-1">مدیریت و تحلیل لینک‌سازی داخلی سایت‌ها</p>
+        </div>
+        <Button onClick={() => navigate('/new')}>
+          <Plus size={20} />
+          <span>پروژه جدید</span>
+        </Button>
+      </div>
+
+      {projects.length === 0 ? (
+        <ProjectEmptyState onNew={() => navigate('/new')} />
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+          {projects.map((project) => (
+            <ProjectCard 
+              key={project.id} 
+              project={project} 
+              onDelete={() => project.id && handleDelete(project.id)} 
+              onConfig={() => navigate(`/config/${project.id}`)}
+              onResult={() => navigate(`/results/${project.id}`)}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}

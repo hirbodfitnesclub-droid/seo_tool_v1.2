@@ -1,0 +1,8 @@
+{
+  "name": "Remix: LinkMesh",
+  "description": "ابزار لینکسازی داخلی هوشمند برای SEO بر اساس شباهت معنایی",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
