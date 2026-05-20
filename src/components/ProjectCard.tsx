@@ -1,22 +1,21 @@
 
 import React from 'react';
-import { useLiveQuery } from 'dexie-react-hooks';
 import { useNavigate } from 'react-router-dom';
-import { db } from '../db';
+import { db, Project } from '../db';
 import { Button } from './ui/Button';
 import { Badge } from './ui/Badge';
 import { Calendar, FileText, BarChart2, Settings, Trash2 } from 'lucide-react';
 
 interface ProjectCardProps {
-  project: any;
+  project: Project;
+  pageCount: number;
   onDelete: () => void;
   onConfig: () => void;
   onResult: () => void;
 }
 
-export const ProjectCard: React.FC<ProjectCardProps> = ({ project, onDelete, onConfig, onResult }) => {
+export const ProjectCard: React.FC<ProjectCardProps> = ({ project, pageCount, onDelete, onConfig, onResult }) => {
   const navigate = useNavigate();
-  const pageCount = useLiveQuery(() => db.pages.where('project_id').equals(project.id).count());
 
   return (
     <div className="bg-white rounded-xl shadow-sm border border-gray-100 p-6 hover:shadow-md transition-shadow">
@@ -38,20 +37,24 @@ export const ProjectCard: React.FC<ProjectCardProps> = ({ project, onDelete, onC
         </div>
       </div>
 
-      <div className="flex gap-2 pt-4 border-t border-gray-50">
+      <div className="flex gap-2 items-center pt-4 border-t border-gray-50">
         <Button variant="primary" className="flex-1 text-sm py-1.5" onClick={() => navigate(`/project/${project.id}`)}>
           <FileText size={16} />
           <span>مشاهده صفحات</span>
         </Button>
-        <Button variant="secondary" className="px-3 py-1.5" onClick={onResult} title="خروجی نهایی">
+        <Button variant="secondary" className="px-3 py-1.5 shrink-0" onClick={onResult} title="خروجی نهایی">
           <BarChart2 size={16} />
         </Button>
-        <Button variant="secondary" className="px-3 py-1.5" onClick={onConfig} title="تنظیمات">
+        <Button variant="secondary" className="px-3 py-1.5 shrink-0" onClick={onConfig} title="تنظیمات">
           <Settings size={16} />
         </Button>
-        <Button variant="danger" className="px-3 py-1.5" onClick={onDelete} title="حذف">
-          <Trash2 size={16} />
-        </Button>
+        <button 
+          onClick={onDelete} 
+          className="p-2.5 text-gray-400 hover:text-red-500 hover:bg-red-55 border border-transparent hover:border-red-100 rounded-lg transition-all active:scale-95 cursor-pointer shrink-0" 
+          title="حذف"
+        >
+          <Trash2 size={15} />
+        </button>
       </div>
     </div>
   );

@@ -1,4 +1,43 @@
 
+import { CandidateWithTags } from './scorer';
+
+export function buildSinglePagePrompt(
+  sourcePage: { title: string; categories: string },
+  candidates: CandidateWithTags[]
+): string {
+  // فقط ۳۰ کاندیدای برتر به AI ارسال می‌شود
+  const top30 = candidates.slice(0, 30);
+  
+  return `
+تو یک متخصص SEO و معمار محتوا هستی. وظیفه تو انتخاب ۱۵ لینک داخلی برتر از بین ۳۰ کاندیدای پیشنهادی است.
+
+استراتژی انتخاب:
+1. اولویت اول: کاندیداهایی با امتیاز بالاتر (نزدیک‌تر به ۱۰)
+2. اولویت دوم: تعداد تگ‌های مشترک بیشتر
+3. اولویت سوم: ارتباط معنایی و تکمیل‌کنندگی سفر کاربر
+
+دستورالعمل حیاتی:
+- اگر کاندیداهای ورودی کمتر از ۱۵ عدد است، تمام آن‌ها را انتخاب کن. در غیر این صورت، دقیقاً ۱۵ لینک برتر انتخاب کن.
+- لینک‌ها را به ترتیب اولویت شماره‌گذاری کن (۱ = مهم‌ترین)
+- برای هر لینک یک دلیل ۱ خطی به زبان فارسی روان بنویس
+
+خروجی را فقط به صورت JSON معتبر برگردان (بدون هیچگونه مارک‌داون یا توضیح اضافی):
+{
+  "selected_links": [
+    { "rank": 1, "page_id": 12, "title": "...", "reason": "..." },
+    { "rank": 2, "page_id": 45, "title": "...", "reason": "..." }
+  ]
+}
+
+--- صفحه اصلی ---
+عنوان: ${sourcePage.title}
+اطلاعات: ${sourcePage.categories}
+
+--- ۳۰ کاندیدای برتر (به ترتیب امتیاز) ---
+${top30.map((c, i) => `${i + 1}. [ID: ${c.page_id}] ${c.title} | امتیاز: ${c.score}/10 | تگ‌های مشترک: ${c.matched_count} (${c.matched_tags.join(', ')})`).join('\n')}
+`;
+}
+
 export function buildPrompt(pages: any[], candidatesMap: Map<number, any[]>, maxLinks: number): string {
   let prompt = `
 تو یک متخصص SEO حرفه‌ای هستی. وظیفه تو انتخاب بهترین لینک‌های داخلی برای صفحات یک سایت گردشگری (نهال‌گشت) است.

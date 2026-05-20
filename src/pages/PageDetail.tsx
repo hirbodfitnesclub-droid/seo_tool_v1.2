@@ -3,21 +3,25 @@ import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db';
 import { useProject } from '../hooks/useProject';
-import { buildSinglePagePrompt } from '../utils/queueProcessor';
+import { buildSinglePagePrompt } from '../utils/gemini';
 import { callGemini } from '../utils/gemini';
+import { safeJsonParse } from '../utils/safeJson';
 import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
 import { Spinner } from '../components/ui/Spinner';
 import { CandidateCard } from '../components/CandidateCard';
+import Breadcrumb from '../components/Breadcrumb';
+import { useToast } from '../hooks/useToast';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
-  ArrowRight, Brain, Info, Save, Trash2, 
-  ChevronUp, ChevronDown, ExternalLink, AlertCircle,
+  ArrowRight, Brain, Info, Save, X, 
+  ChevronUp, ChevronDown, ExternalLink,
   CheckCircle, BarChart2, Globe, Tag, Sparkles
 } from 'lucide-react';
 
 export default function PageDetail() {
   const { projectId, pageId } = useParams<{ projectId: string, pageId: string }>();
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   const navigate = useNavigate();
   const pId = parseInt(projectId || '0');
   const pgId = parseInt(pageId || '0');
@@ -26,69 +30,78 @@ export default function PageDetail() {
   const page = useLiveQuery(() => db.pages.get(pgId));
   const candidateRec = useLiveQuery(() => db.candidates.where('source_page_id').equals(pgId).first());
   const result = useLiveQuery(() => db.results.where('source_page_id').equals(pgId).first());
+  const { showToast } = useToast();
 
   const [selectedLinks, setSelectedLinks] = useState<any[]>([]);
   const [analyzing, setAnalyzing] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [isUnsaved, setIsUnsaved] = useState(false);
+  
+  // وضعیت نمایش تمامی کاندیداها (بیش از ۳۰ مورد)
+  const [showAllCandidates, setShowAllCandidates] = useState(false);
 
+  // لود اولیه لینک‌های نهایی
   useEffect(() => {
     if (result) {
-      setSelectedLinks(JSON.parse(result.recommended_links));
+      setSelectedLinks(safeJsonParse(result.recommended_links, []));
+      setIsUnsaved(false);
     }
   }, [result]);
 
-  const candidateList = candidateRec ? JSON.parse(candidateRec.candidate_list) : [];
-  const categories = page ? JSON.parse(page.categories) : {};
+  // بررسی تغییرات ذخیره‌نشده برای هشدار خروج از صفحه
+  useEffect(() => {
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      if (isUnsaved) {
+        e.preventDefault();
+        e.returnValue = '';
+      }
+    };
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    return () => window.removeEventListener('beforeunload', handleBeforeUnload);
+  }, [isUnsaved]);
+
+  const candidateList = candidateRec ? safeJsonParse(candidateRec.candidate_list, []) : [];
+  const categories = page ? safeJsonParse(page.categories, {}) : {};
+
+  // نمایش ۳۰ کاندیدای برتر در حالت پیش‌فرض و نمایش بقیه با دکمه مشاهده بیشتر
+  const displayedCandidates = showAllCandidates ? candidateList : candidateList.slice(0, 30);
 
   const handleAIAnalysis = async () => {
-    const apiKey = localStorage.getItem('LINKMESH_API_KEY');
-    if (!apiKey) {
-      setError('کلید API وارد نشده است. لطفاً در تنظیمات وارد کنید.');
-      return;
-    }
-
     setAnalyzing(true);
-    setError(null);
     try {
-      const prompt = buildSinglePagePrompt({ title: page!.title, categories }, candidateList);
-      const response = await callGemini(prompt, apiKey);
+      const prompt = buildSinglePagePrompt({ title: page!.title, categories: page!.categories }, candidateList);
+      const response = await callGemini(prompt, 'gemini-3.1-flash-lite');
       const newLinks = response.selected_links || [];
       
-      await db.transaction('rw', [db.results], async () => {
-        await db.results.where('source_page_id').equals(pgId).delete();
-        await db.results.add({
-          project_id: pId,
-          source_page_id: pgId,
-          source_title: page!.title,
-          recommended_links: JSON.stringify(newLinks),
-          is_manual_edit: false,
-          generated_at: new Date().toISOString()
-        });
-      });
-      setError('تحلیل هوشمند با موفقیت جایگزین شد (موفقیت)');
-      setTimeout(() => setError(null), 3000);
+      setSelectedLinks(newLinks);
+      setIsUnsaved(true);
+      showToast({ type: 'success', message: 'تحلیل هوشمند جدید با موفقیت اعمال شد. برای ثبت نهایی دکمه ثبت تغییرات را بزنید.' });
     } catch (err: any) {
-      setError(err.message || 'خطا در ارتباط با هوش مصنوعی');
+      console.error(err);
+      showToast({ type: 'error', message: err.message || 'خطا در ارتباط با هوش مصنوعی' });
     } finally {
       setAnalyzing(false);
     }
   };
 
   const handleSaveManual = async () => {
-    await db.transaction('rw', [db.results], async () => {
-      await db.results.where('source_page_id').equals(pgId).delete();
-      await db.results.add({
-        project_id: pId,
-        source_page_id: pgId,
-        source_title: page!.title,
-        recommended_links: JSON.stringify(selectedLinks),
-        is_manual_edit: true,
-        generated_at: new Date().toISOString()
+    try {
+      await db.transaction('rw', [db.results], async () => {
+        await db.results.where('source_page_id').equals(pgId).delete();
+        await db.results.add({
+          project_id: pId,
+          source_page_id: pgId,
+          source_title: page!.title,
+          recommended_links: JSON.stringify(selectedLinks),
+          is_manual_edit: true,
+          generated_at: new Date().toISOString()
+        });
       });
-    });
-    // نمایش نوتیفیکیشن یا بازخورد ملایم‌تر به جای alert
-    setError('تغییرات با موفقیت ذخیره شد (پیام موفقیت)');
-    setTimeout(() => setError(null), 3000);
+      setIsUnsaved(false);
+      showToast({ type: 'success', message: 'تغییرات شما با موفقیت در بانک پیشرفته نتایج ثبت شد.' });
+    } catch (err: any) {
+      console.error(err);
+      showToast({ type: 'error', message: 'خطا در ذخیره‌سازی تغییرات دستی.' });
+    }
   };
 
   const toggleCandidate = (candidate: any) => {
@@ -102,6 +115,7 @@ export default function PageDetail() {
         reason: 'انتخاب دستی کاربر' 
       }]);
     }
+    setIsUnsaved(true);
   };
 
   const moveLink = (index: number, direction: 'up' | 'down') => {
@@ -110,98 +124,96 @@ export default function PageDetail() {
     if (targetIndex >= 0 && targetIndex < newLinks.length) {
       [newLinks[index], newLinks[targetIndex]] = [newLinks[targetIndex], newLinks[index]];
       setSelectedLinks(newLinks);
+      setIsUnsaved(true);
     }
   };
 
   if (projectLoading || !page) return <div className="flex justify-center py-20"><Spinner size="lg" /></div>;
 
   return (
-    <div className="max-w-[1400px] mx-auto pb-20 space-y-8 animate-in fade-in duration-700">
+    <div className="max-w-6xl mx-auto pb-20 space-y-6 animate-in fade-in duration-300" dir="rtl">
+      {/* Breadcrumbs */}
+      <Breadcrumb items={[
+        { label: project?.name || 'پروژه', href: `/project/${pId}` },
+        { label: page.title }
+      ]} />
       
-      {/* Dynamic Header */}
+      {/* هدر داینامیک با هویت برند آبی لینک‌مش */}
       <motion.div 
         initial={{ y: -20, opacity: 0 }}
         animate={{ y: 0, opacity: 1 }}
-        className="flex flex-col lg:flex-row justify-between items-start lg:items-end gap-6 bg-white p-8 rounded-[2.5rem] border border-gray-100 shadow-xl shadow-gray-100/50 relative overflow-hidden"
+        className="flex flex-col lg:flex-row justify-between items-start lg:items-center gap-6 bg-white p-6 rounded-2xl border border-gray-100 shadow-xs relative overflow-hidden"
       >
-        <div className="absolute top-0 right-0 w-64 h-64 bg-emerald-50 rounded-full -mr-32 -mt-32 blur-3xl opacity-50" />
+        <div className="absolute top-0 right-0 w-64 h-64 bg-blue-50 rounded-full -mr-32 -mt-32 blur-3xl opacity-40" />
         
-        <div className="relative z-10 space-y-4 max-w-2xl">
+        <div className="relative z-10 space-y-3.5 max-w-2xl">
           <div className="flex items-center gap-3">
-            <Link to={`/project/${pId}`} className="p-2.5 bg-gray-50 rounded-2xl hover:bg-emerald-50 hover:text-emerald-600 transition-all group">
-              <ArrowRight size={22} className="group-hover:-translate-x-1 transition-transform" />
+            <Link to={`/project/${pId}`} className="p-2 bg-gray-50 rounded-xl hover:bg-blue-50 hover:text-blue-600 transition-all group shrink-0">
+              <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
             </Link>
-            <Badge variant="blue" className="bg-blue-50 text-blue-600 border-blue-100 px-3 py-1">SEO Workstation</Badge>
+            <Badge variant="blue" className="px-3 py-1 bg-blue-50 text-blue-700 border-blue-100">SEO Workstation</Badge>
+            {isUnsaved && (
+              <span className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-bold rounded-lg bg-yellow-50 text-yellow-700 border border-yellow-100 animate-pulse">
+                * تغییرات ذخیره نشده
+              </span>
+            )}
           </div>
-          <h1 className="text-3xl font-black text-gray-900 leading-tight tracking-tight">{page.title}</h1>
-          <div className="flex flex-wrap items-center gap-4 text-sm text-gray-500 font-medium">
-             <div className="flex items-center gap-1.5 bg-gray-50 px-3 py-1.5 rounded-xl border border-gray-100">
-                <Globe size={14} className="text-emerald-500" />
+          <h1 className="text-2xl font-bold text-gray-900 leading-tight tracking-tight">{page.title}</h1>
+          <div className="flex flex-wrap items-center gap-3.5 text-xs text-gray-500 font-medium">
+             <div className="flex items-center gap-1.5 bg-gray-50 px-2.5 py-1.5 rounded-lg border border-gray-100">
+                <Globe size={13} className="text-blue-500" />
                 <span>{project?.name}</span>
              </div>
-             <div className="flex items-center gap-1.5 bg-gray-50 px-3 py-1.5 rounded-xl border border-gray-100">
-                <Tag size={14} className="text-blue-500" />
+             <div className="flex items-center gap-1.5 bg-gray-50 px-2.5 py-1.5 rounded-lg border border-gray-100">
+                <Tag size={13} className="text-blue-500" />
                 <span>تگ‌ها: {Object.keys(categories).length} مورد</span>
              </div>
           </div>
         </div>
 
-        <div className="relative z-10 flex flex-col sm:flex-row gap-3 w-full lg:w-auto">
+        <div className="relative z-10 flex flex-col sm:flex-row gap-3 w-full lg:w-auto shrink-0">
           <Button 
             onClick={handleAIAnalysis} 
             loading={analyzing} 
-            className="flex-1 sm:flex-none py-4 px-8 bg-emerald-600 hover:bg-emerald-700 shadow-lg shadow-emerald-100 rounded-2xl"
+            className="flex-1 sm:flex-none py-2.5 px-6 bg-blue-600 hover:bg-blue-700 shadow-sm rounded-xl text-sm transition-all"
           >
-            <Sparkles size={20} />
-            <span>AI Magic Analysis</span>
+            <Sparkles size={16} />
+            <span>تحلیل جادویی AI</span>
           </Button>
           <Button 
             onClick={handleSaveManual} 
             variant="secondary"
-            className="flex-1 sm:flex-none py-4 px-8 border-2 border-gray-100 hover:border-emerald-200 rounded-2xl"
+            className="flex-1 sm:flex-none py-2.5 px-6 border border-gray-100 hover:border-blue-200 rounded-xl text-sm font-bold bg-white text-gray-700 transition-all"
           >
-            <Save size={20} />
-            <span>Commit Changes</span>
+            <Save size={16} />
+            <span>ثبت تغییرات</span>
           </Button>
         </div>
       </motion.div>
 
-      {error && (
-        <motion.div 
-          initial={{ scale: 0.95, opacity: 0 }}
-          animate={{ scale: 1, opacity: 1 }}
-          className={`p-4 rounded-2xl flex items-center gap-3 border ${error.includes('موفقیت') ? 'bg-emerald-50 border-emerald-100 text-emerald-700' : 'bg-red-50 border-red-100 text-red-700'}`}
-        >
-          {error.includes('موفقیت') ? <CheckCircle size={20} /> : <AlertCircle size={20} />}
-          <p className="text-sm font-bold">{error}</p>
-        </motion.div>
-      )}
-
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
-        
-        {/* Left Column: Editor Zone (8 Cols) */}
-        <div className="lg:col-span-8 space-y-10">
-          
-          {/* Selected Links Bento */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+        {/* ستون لودر و ادیتور */}
+        <div className="lg:col-span-8 space-y-6">
+          {/* بخش لینک‌های نهایی انتخاب شده */}
           <motion.section 
             initial={{ y: 20, opacity: 0 }}
             whileInView={{ y: 0, opacity: 1 }}
             viewport={{ once: true }}
-            className="bg-white rounded-[2rem] border border-gray-100 shadow-sm overflow-hidden"
+            className="bg-white rounded-2xl border border-gray-100 shadow-xs overflow-hidden"
           >
-            <div className="p-6 bg-gray-50/50 border-b border-gray-100 flex justify-between items-center px-8">
-              <div className="flex items-center gap-3">
-                 <div className="p-2 bg-emerald-500 rounded-xl text-white">
-                    <CheckCircle size={18} />
+            <div className="p-5 bg-gray-50/50 border-b border-gray-100 flex justify-between items-center px-6">
+              <div className="flex items-center gap-2.5">
+                 <div className="p-1.5 bg-blue-600 rounded-lg text-white">
+                    <CheckCircle size={15} />
                  </div>
-                 <h3 className="font-black text-gray-900 tracking-tight">لینک‌های نهایی (Selected)</h3>
+                 <h3 className="font-bold text-gray-900 tracking-tight text-sm">لینک‌های نهایی (Selected)</h3>
               </div>
-              <Badge className="rounded-full px-4">
+              <Badge variant="blue" className="rounded-full px-3">
                 {selectedLinks.length} لینک فعال
               </Badge>
             </div>
 
-            <div className="p-8 space-y-5">
+            <div className="p-6 space-y-4">
               <AnimatePresence mode="popLayout">
                 {selectedLinks.length > 0 ? (
                   selectedLinks.map((link, idx) => (
@@ -211,32 +223,40 @@ export default function PageDetail() {
                       initial={{ x: -20, opacity: 0 }}
                       animate={{ x: 0, opacity: 1 }}
                       exit={{ x: 20, opacity: 0 }}
-                      className="group p-5 bg-white rounded-2xl border border-gray-100 hover:border-emerald-200 hover:shadow-lg hover:shadow-emerald-50 transition-all flex gap-5 items-center relative"
+                      className="group p-4 bg-white rounded-xl border border-gray-100 hover:border-blue-200 hover:shadow-xs transition-all flex gap-4 items-center relative"
                     >
-                      <div className="flex flex-col gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button onClick={() => moveLink(idx, 'up')} disabled={idx === 0} className="p-1.5 text-gray-300 hover:text-emerald-500 disabled:opacity-10"><ChevronUp size={18} /></button>
-                        <button onClick={() => moveLink(idx, 'down')} disabled={idx === selectedLinks.length - 1} className="p-1.5 text-gray-300 hover:text-emerald-500 disabled:opacity-10"><ChevronDown size={18} /></button>
+                      <div className="flex flex-col gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity shrink-0">
+                        <button onClick={() => moveLink(idx, 'up')} disabled={idx === 0} className="p-1 text-gray-300 hover:text-blue-600 disabled:opacity-10 cursor-pointer"><ChevronUp size={16} /></button>
+                        <button onClick={() => moveLink(idx, 'down')} disabled={idx === selectedLinks.length - 1} className="p-1 text-gray-300 hover:text-blue-600 disabled:opacity-10 cursor-pointer"><ChevronDown size={16} /></button>
                       </div>
 
                       <div className="flex-1 min-w-0">
                         <div className="flex justify-between items-start gap-4">
                            <div className="min-w-0">
-                              <h4 className="font-bold text-gray-900 truncate flex items-center gap-2">
-                                <ExternalLink size={14} className="text-blue-400" />
-                                {link.title}
+                              <h4 className="font-bold text-gray-900 truncate flex items-center gap-2 text-sm">
+                                 {/* شماره اولویت‌بندی خروجی با اعداد انگلیسی */}
+                                 <span className="font-extrabold text-xs text-blue-600 bg-blue-50 w-5 h-5 rounded-md flex items-center justify-center shrink-0">
+                                   {idx + 1}
+                                 </span>
+                                 <ExternalLink size={13} className="text-blue-400 shrink-0" />
+                                 <span className="truncate">{link.title}</span>
                               </h4>
-                              <p className="text-[10px] text-gray-400 mt-0.5 font-medium uppercase tracking-wider">ID: #{link.page_id}</p>
+                              <p className="text-[10px] text-gray-400 mt-0.5 font-medium uppercase tracking-wider mr-7">ID: #{link.page_id}</p>
                            </div>
                            <button 
-                              onClick={() => setSelectedLinks(selectedLinks.filter(l => l.page_id !== link.page_id))}
-                              className="w-10 h-10 flex items-center justify-center rounded-xl bg-gray-50 text-gray-400 hover:bg-red-50 hover:text-red-500 transition-colors"
+                              onClick={() => {
+                                setSelectedLinks(selectedLinks.filter(l => l.page_id !== link.page_id));
+                                setIsUnsaved(true);
+                              }}
+                              className="w-8 h-8 flex items-center justify-center rounded-lg bg-gray-50 text-gray-400 hover:bg-yellow-50 hover:text-gray-700 transition-colors cursor-pointer shrink-0"
+                              title="حذف از لیست نهایی"
                             >
-                              <Trash2 size={18} />
+                              <X size={15} />
                            </button>
                         </div>
-                        <div className="mt-4 flex items-center gap-3">
-                           <div className="p-2 bg-emerald-50 rounded-lg text-emerald-600">
-                              <Info size={14} />
+                        <div className="mt-3 flex items-center gap-2 mr-7">
+                           <div className="p-1.5 bg-gray-50 rounded-lg text-gray-500 shrink-0">
+                              <Info size={13} />
                            </div>
                            <input 
                               type="text" 
@@ -246,8 +266,9 @@ export default function PageDetail() {
                                 const newLinks = [...selectedLinks];
                                 newLinks[idx].reason = e.target.value;
                                 setSelectedLinks(newLinks);
+                                setIsUnsaved(true);
                               }}
-                              className="w-full bg-transparent text-xs font-medium text-gray-600 outline-none placeholder:text-gray-300"
+                              className="w-full bg-transparent text-xs font-semibold text-gray-600 outline-hidden placeholder:text-gray-300 border-none p-0 focus:ring-0"
                            />
                         </div>
                       </div>
@@ -257,74 +278,89 @@ export default function PageDetail() {
                   <motion.div 
                     initial={{ opacity: 0 }}
                     animate={{ opacity: 1 }}
-                    className="py-16 text-center"
+                    className="py-12 text-center"
                   >
-                    <div className="w-24 h-24 bg-gray-50 rounded-[2rem] flex items-center justify-center mx-auto mb-6 text-gray-200">
-                      <Sparkles size={48} />
+                    <div className="w-16 h-16 bg-gray-50 rounded-xl flex items-center justify-center mx-auto mb-4 text-gray-300">
+                      <Sparkles size={28} />
                     </div>
-                    <h4 className="text-gray-400 font-bold">هنوز هیچ لینکی انتخاب نشده</h4>
-                    <p className="text-gray-300 text-xs mt-2">از لیست پیشنهادات سمت راست یا AI استفاده کنید.</p>
+                    <h4 className="text-gray-400 font-bold text-sm">هنوز هیچ لینکی انتخاب نشده</h4>
+                    <p className="text-gray-300 text-xs mt-1">از لیست پیشنهادات پایین یا دکمه هوش مصنوعی استفاده کنید.</p>
                   </motion.div>
                 )}
               </AnimatePresence>
             </div>
           </motion.section>
 
-          {/* Suggestions List */}
-          <section className="space-y-6">
-             <div className="flex items-center gap-4 px-4">
-                <div className="p-2 bg-blue-500 rounded-xl text-white shadow-lg shadow-blue-100">
-                  <BarChart2 size={18} />
+          {/* کاندیداهای هوشمند الگوریتمی */}
+          <section className="space-y-4">
+             <div className="flex items-center gap-3 px-2">
+                <div className="p-1.5 bg-blue-500 rounded-lg text-white shadow-xs">
+                  <BarChart2 size={16} />
                 </div>
                 <div className="flex-1">
-                   <h3 className="font-black text-gray-900 tracking-tight">کاندیداهای هوشمند (Smart Pool)</h3>
-                   <p className="text-[10px] text-gray-400 font-bold uppercase tracking-widest mt-0.5">Full Algorithmic Deep Context</p>
+                   <h3 className="font-bold text-gray-900 tracking-tight text-sm">کاندیداهای هوشمند (Smart Pool)</h3>
+                   <p className="text-[10px] text-gray-400 font-bold capitalize mt-0.5">جدول پیشنهادی الگوریتمی</p>
                 </div>
              </div>
 
-             <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
-                {candidateList.map((c: any, index: number) => (
+             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {displayedCandidates.map((c: any, index: number) => (
                   <motion.div
                     key={c.page_id}
-                    initial={{ opacity: 0, y: 20 }}
+                    initial={{ opacity: 0, y: 15 }}
                     whileInView={{ opacity: 1, y: 0 }}
                     viewport={{ once: true }}
-                    transition={{ delay: index * 0.05 }}
+                    transition={{ delay: index * 0.02 }}
                   >
+                    {/* ارسال اختیاری مقدار index برای رتبه‌دهی ترتیبی مطمئن */}
                     <CandidateCard 
                       candidate={c} 
                       isSelected={selectedLinks.some(l => l.page_id === c.page_id)}
                       onToggle={() => toggleCandidate(c)}
+                      index={index}
                     />
                   </motion.div>
                 ))}
              </div>
+
+             {/* دکمه مشاهده بیشتر منطقی و استاندارد */}
+             {candidateList.length > 30 && !showAllCandidates && (
+               <div className="flex justify-center pt-6">
+                 <Button
+                   onClick={() => setShowAllCandidates(true)}
+                   variant="secondary"
+                   className="py-2.5 px-8 border border-blue-100 hover:border-blue-200 rounded-xl text-xs font-bold bg-white text-blue-600 hover:bg-blue-50/50 shadow-xs transition-all flex items-center gap-1.5"
+                 >
+                   <span>مشاهده بیشتر ({candidateList.length - 30} مورد دیگر)</span>
+                 </Button>
+               </div>
+             )}
           </section>
         </div>
 
-        {/* Right Column: Metadata (4 Cols) */}
-        <div className="lg:col-span-4 sticky top-8 space-y-8">
+        {/* ستون سمت راست: متادیتا */}
+        <div className="lg:col-span-4 space-y-6">
            <motion.section 
-              initial={{ x: 20, opacity: 0 }}
+              initial={{ x: -20, opacity: 0 }}
               animate={{ x: 0, opacity: 1 }}
-              className="bg-gray-900 rounded-[2rem] p-8 text-white shadow-2xl shadow-gray-200 relative overflow-hidden"
+              className="bg-white rounded-2xl p-6 text-gray-800 border border-gray-100 shadow-xs relative overflow-hidden"
            >
-              <div className="absolute top-0 right-0 w-32 h-32 bg-emerald-500 rounded-full -mr-16 -mt-16 blur-3xl opacity-20" />
+              <div className="absolute top-0 right-0 w-32 h-32 bg-blue-50 rounded-full -mr-16 -mt-16 blur-3xl opacity-50" />
               
-              <h3 className="text-lg font-black mb-8 flex items-center gap-3 relative z-10">
-                <Globe size={20} className="text-emerald-400" />
-                <span>Page Attributes</span>
+              <h3 className="text-sm font-bold pb-4 border-b border-gray-50 mb-4 flex items-center gap-2 relative z-10 text-gray-900">
+                <Globe size={16} className="text-blue-500" />
+                <span>ویژگی‌های محتوایی صفحه</span>
               </h3>
 
-              <div className="space-y-6 relative z-10">
+              <div className="space-y-4 relative z-10" dir="rtl">
                 {Object.entries(categories).map(([key, value]) => {
                   if (value === null || value === '' || value === undefined) return null;
                   return (
-                    <div key={key} className="space-y-2 group">
-                      <div className="text-[10px] text-gray-500 font-black uppercase tracking-widest group-hover:text-emerald-400 transition-colors">
+                    <div key={key} className="space-y-1.5 group">
+                      <div className="text-[10px] text-gray-400 font-bold uppercase tracking-wider group-hover:text-blue-500 transition-colors">
                         {key.replace(/_/g, ' ')}
                       </div>
-                      <div className="text-sm font-medium leading-relaxed bg-white/5 border border-white/10 p-4 rounded-2xl hover:bg-white/10 transition-colors">
+                      <div className="text-xs font-semibold leading-relaxed bg-gray-50 border border-gray-100/50 p-3 rounded-xl hover:bg-gray-100/50 transition-colors">
                         {String(value)}
                       </div>
                     </div>
@@ -333,13 +369,13 @@ export default function PageDetail() {
               </div>
            </motion.section>
 
-           <div className="bg-emerald-50 p-6 rounded-[2rem] border border-emerald-100 flex gap-4">
-              <div className="p-3 bg-emerald-500 rounded-2xl text-white shadow-lg shadow-emerald-200">
-                <Brain size={24} />
+           <div className="bg-blue-50/40 p-5 rounded-2xl border border-blue-100/60 flex gap-3">
+              <div className="p-2 bg-blue-500 rounded-xl text-white shadow-xs shrink-0 self-start">
+                <Brain size={18} />
               </div>
               <div className="space-y-1">
-                 <h4 className="font-bold text-emerald-900 text-sm">نکته SEO</h4>
-                 <p className="text-[11px] text-emerald-700 leading-relaxed">
+                 <h4 className="font-bold text-blue-950 text-xs">نکته طلایی سئو</h4>
+                 <p className="text-[11px] text-blue-700 leading-relaxed font-semibold">
                     لینک‌سازی داخلی متعادل، اعتبار صفحه (Page Authority) را به درستی توزیع می‌کند. بر روی تگ‌های مرتبط تمرکز کنید.
                  </p>
               </div>

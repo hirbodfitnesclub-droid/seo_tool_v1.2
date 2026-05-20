@@ -1,5 +1,5 @@
 
-import React from 'react';
+import React, { useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useNavigate } from 'react-router-dom';
 import { db } from '../db';
@@ -8,20 +8,36 @@ import { Spinner } from '../components/ui/Spinner';
 import { Plus } from 'lucide-react';
 import { ProjectCard } from '../components/ProjectCard';
 import { ProjectEmptyState } from '../components/ProjectEmptyState';
+import ConfirmDialog from '../components/ConfirmDialog';
 
 export default function Home() {
   const navigate = useNavigate();
   const projects = useLiveQuery(() => db.projects.orderBy('created_at').reverse().toArray());
+  const [deleteId, setDeleteId] = useState<number | null>(null);
 
-  const handleDelete = async (id: number) => {
-    if (confirm('آیا از حذف این پروژه و تمام داده‌های آن مطمئن هستید؟')) {
-      await db.transaction('rw', [db.projects, db.pages, db.weights, db.results], async () => {
-        await db.projects.delete(id);
-        await db.pages.where('project_id').equals(id).delete();
-        await db.weights.where('project_id').equals(id).delete();
-        await db.results.where('project_id').equals(id).delete();
-      });
+  // Batch query to calculate count of pages for each project to improve performance
+  const pageCounts = useLiveQuery(async () => {
+    const counts = new Map<number, number>();
+    if (!projects) return counts;
+    for (const p of projects) {
+      if (p.id) {
+        counts.set(p.id, await db.pages.where('project_id').equals(p.id).count());
+      }
     }
+    return counts;
+  }, [projects]);
+
+  const handleDelete = async () => {
+    if (!deleteId) return;
+    await db.transaction('rw', [db.projects, db.pages, db.weights, db.results, db.candidates, db.analysisQueue], async () => {
+      await db.projects.delete(deleteId);
+      await db.pages.where('project_id').equals(deleteId).delete();
+      await db.weights.where('project_id').equals(deleteId).delete();
+      await db.results.where('project_id').equals(deleteId).delete();
+      await db.candidates.where('project_id').equals(deleteId).delete();
+      await db.analysisQueue.where('project_id').equals(deleteId).delete();
+    });
+    setDeleteId(null);
   };
 
   if (projects === undefined) return <div className="flex justify-center py-20"><Spinner size="lg" /></div>;
@@ -47,13 +63,25 @@ export default function Home() {
             <ProjectCard 
               key={project.id} 
               project={project} 
-              onDelete={() => project.id && handleDelete(project.id)} 
+              pageCount={pageCounts?.get(project.id!) ?? 0}
+              onDelete={() => project.id && setDeleteId(project.id)} 
               onConfig={() => navigate(`/config/${project.id}`)}
               onResult={() => navigate(`/results/${project.id}`)}
             />
           ))}
         </div>
       )}
+
+      <ConfirmDialog
+        isOpen={deleteId !== null}
+        title="حذف پروژه"
+        message="آیا از حذف این پروژه و تمامی صفحه‌ها، تنظیمات و نتایج تحلیل آن اطمینان دارید؟ این عمل غیرقابل بازگشت است."
+        confirmText="بله، حذف شود"
+        cancelText="انصراف"
+        confirmType="danger"
+        onConfirm={handleDelete}
+        onCancel={() => setDeleteId(null)}
+      />
     </div>
   );
 }

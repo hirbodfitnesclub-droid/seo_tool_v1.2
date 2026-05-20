@@ -1,6 +1,7 @@
 import { db } from '../db';
-import { callGemini } from './gemini';
+import { callGemini, buildSinglePagePrompt } from './gemini';
 import { CandidateWithTags } from './scorer';
+import { safeJsonParse } from './safeJson';
 
 /**
  * پردازشگر اصلی صف هوش مصنوعی
@@ -37,11 +38,10 @@ export async function processQueue(projectId: number) {
         continue;
       }
 
-      const candidateList: CandidateWithTags[] = JSON.parse(candidateRecord.candidate_list);
-      const categories = JSON.parse(page.categories);
+      const candidateList: CandidateWithTags[] = safeJsonParse(candidateRecord.candidate_list, []);
 
       // ب: ساخت پرامپت و فراخوانی API
-      const prompt = buildSinglePagePrompt({ title: page.title, categories }, candidateList);
+      const prompt = buildSinglePagePrompt({ title: page.title, categories: page.categories }, candidateList);
       const response = await callGemini(prompt, selectedModel);
 
       // ج: ذخیره نتیجه بلافاصله (اتومیک)
@@ -90,40 +90,4 @@ export async function processQueue(projectId: number) {
       updated_at: new Date().toISOString()
     });
   }
-}
-
-/**
- * پرامپت برای تحلیل تکی هر صفحه
- */
-export function buildSinglePagePrompt(
-  sourcePage: { title: string; categories: object },
-  candidates: CandidateWithTags[]
-): string {
-  return `
-تو یک متخصص SEO و معمار محتوا هستی. وظیفه تو تحلیل "عمیق" و انتخاب بهترین لینک‌های داخلی برای صفحه اصلی از بین تمام کاندیداهای پیشنهادی است.
-
-استراتژی انتخاب:
-1. ارتباط موضوعی مستقیم: صفحاتی که تگ‌های مشترک زیادی دارند.
-2. تکمیل‌کنندگی سفر کاربر: صفحاتی که اطلاعات تکمیلی برای صفحه منبع ارائه می‌دهند.
-3. خوشه‌بندی محتوایی (Topic Clusters): صفحاتی که در یک دسته جغرافیایی یا خدماتی هستند.
-
-دستورالعمل حیاتی:
-- محدودیت عددی وجود ندارد. هر تعداد از کاندیداها که واقعاً برای سئو و کاربر مفید هستند را انتخاب کن.
-- اگر تمام ${candidates.length} کاندیدا مرتبط هستند، همه را انتخاب کن.
-- پاسخ باید شامل "دلیل استراتژیک" برای هر انتخاب باشد.
-
-خروجی را "فقط" به صورت یک آبجکت JSON معتبر برگردان:
-{
-  "selected_links": [
-    { "page_id": 12, "title": "...", "reason": "تحلیل مشترک تگ منطقه و نوع تور..." }
-  ]
-}
-
---- صفحه اصلی ---
-عنوان: ${sourcePage.title}
-اطلاعات طبقه‌بندی: ${JSON.stringify(sourcePage.categories)}
-
---- تمام کاندیداهای پیشنهادی (به ترتیب امتیاز شباهت) ---
-${candidates.map((c, i) => `${i + 1}. [ID: ${c.page_id}] ${c.title} | امتیاز: ${c.score} | تگ‌های مشترک: ${c.matched_tags.join(', ')}`).join('\n')}
-`;
 }

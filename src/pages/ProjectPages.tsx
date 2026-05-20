@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { db } from '../db';
@@ -10,10 +10,15 @@ import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
 import { Spinner } from '../components/ui/Spinner';
 import { QueueProgress } from '../components/QueueProgress';
+import Modal from '../components/ui/Modal';
+import EmptyState from '../components/ui/EmptyState';
+import Breadcrumb from '../components/Breadcrumb';
+import { useDebounce } from '../hooks/useDebounce';
+import { useToast } from '../hooks/useToast';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Search, Brain, BarChart2, Settings, ChevronLeft, 
-  FileText, CheckCircle, Zap, ArrowRight 
+  FileText, CheckCircle, ArrowRight 
 } from 'lucide-react';
 
 export default function ProjectPages() {
@@ -21,11 +26,15 @@ export default function ProjectPages() {
   const id = parseInt(projectId || '0');
   
   const { project, pages, weights, loading } = useProject(id);
-  const { queue, startQueue, pauseQueue, resumeQueue, resetQueue } = useAnalysisQueue(id);
+  const { queue, startQueue, pauseQueue, resumeQueue } = useAnalysisQueue(id);
+  const { showToast } = useToast();
   
   const [searchTerm, setSearchTerm] = useState('');
+  const debouncedSearchTerm = useDebounce(searchTerm, 300);
+  
   const [isProcessing, setIsProcessing] = useState(false);
   const [scoringStatus, setScoringStatus] = useState<string | null>(null);
+  const processingRef = useRef(false);
 
   const candidatesCount = useLiveQuery(() => db.candidates.where('project_id').equals(id).count());
   
@@ -33,38 +42,27 @@ export default function ProjectPages() {
   const [selectedModel, setSelectedModel] = useState('gemini-3.1-flash-lite');
   const [analysisMode, setAnalysisMode] = useState<'all' | 'pending'>('pending');
 
-  // بررسی خودکار کاندیداها (امتیازدهی الگوریتمی) در بدو ورود
-  useEffect(() => {
-    const autoScore = async () => {
-      if (candidatesCount === 0 && pages && pages.length > 0 && weights) {
-        try {
-          setScoringStatus('درحال امتیازدهی الگوریتمی اولیه...');
-          const weightMap: Record<string, number> = {};
-          weights.forEach(w => weightMap[w.category_name] = w.weight_value);
-          await computeAndStoreCandidates(id, pages, weightMap, project?.scoring_mode || 'linear');
-          setScoringStatus(null);
-        } catch (err) {
-          console.error('Auto-scoring failed:', err);
-          setScoringStatus('خطا در امتیازدهی خودکار');
-        }
-      }
-    };
-    if (!loading && project) {
-      autoScore();
-    }
-  }, [candidatesCount, pages, weights, id, loading, project]);
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 10;
 
-  // کال کردن پروسسور زمانی که وضعیت صف تغییر می‌کند
+  // اجرای پروسسور صف با حل Race Condition
   useEffect(() => {
-    if (queue?.status === 'processing' || queue?.status === 'pending') {
+    if ((queue?.status === 'processing' || queue?.status === 'pending') && !processingRef.current) {
+      processingRef.current = true;
       setIsProcessing(true);
       processQueue(id)
-        .catch(console.error)
-        .finally(() => setIsProcessing(false));
-    } else {
+        .catch((err) => {
+          console.error(err);
+          showToast({ type: 'error', message: err.message || 'خطا در اجرای تحلیل هوشمند رخ داد' });
+        })
+        .finally(() => {
+          processingRef.current = false;
+          setIsProcessing(false);
+        });
+    } else if (queue?.status !== 'processing' && queue?.status !== 'pending') {
       setIsProcessing(false);
     }
-  }, [queue?.status, id]);
+  }, [queue?.status, id, showToast]);
 
   const results = useLiveQuery(() => db.results.where('project_id').equals(id).toArray());
 
@@ -81,8 +79,37 @@ export default function ProjectPages() {
 
   const filteredPages = useMemo(() => {
     if (!pages) return [];
-    return pages.filter(p => p.title.toLowerCase().includes(searchTerm.toLowerCase()));
-  }, [pages, searchTerm]);
+    return pages.filter(p => p.title.toLowerCase().includes(debouncedSearchTerm.toLowerCase()));
+  }, [pages, debouncedSearchTerm]);
+
+  // صفحه جاری بر اساس آیتم‌های فیلتر شده
+  const totalPages = Math.ceil(filteredPages.length / itemsPerPage);
+
+  const paginatedPages = useMemo(() => {
+    const start = (currentPage - 1) * itemsPerPage;
+    return filteredPages.slice(start, start + itemsPerPage);
+  }, [filteredPages, currentPage]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [debouncedSearchTerm]);
+
+  // متد دستی محاسبه کاندیداها
+  const handleComputeCandidates = async () => {
+    if (!pages || !project) return;
+    try {
+      setScoringStatus('درحال امتیازدهی الگوریتمی کاندیداها...');
+      const weightMap: Record<string, number> = {};
+      weights.forEach(w => weightMap[w.category_name] = w.weight_value);
+      await computeAndStoreCandidates(id, pages, weightMap, project.scoring_mode || 'linear');
+      setScoringStatus(null);
+      showToast({ type: 'success', message: 'امتیازدهی کاندیداها با موفقیت انجام شد.' });
+    } catch (err: any) {
+      console.error(err);
+      setScoringStatus(null);
+      showToast({ type: 'error', message: 'خطا در محاسبه امتیازدهی کاندیداها.' });
+    }
+  };
 
   const handleRunAnalysis = async () => {
     if (!pages || !project) return;
@@ -91,7 +118,6 @@ export default function ProjectPages() {
       setShowSetup(false);
       setIsProcessing(true);
       
-      // ۱. اگر حالت "تمام صفحات" انتخاب شده، نتایج قبلی را پاک کرده و ایندکس را صفر می‌کنیم
       if (analysisMode === 'all') {
         await db.results.where('project_id').equals(id).delete();
         await db.analysisQueue.where('project_id').equals(id).modify({ current_page_index: 0 });
@@ -103,10 +129,8 @@ export default function ProjectPages() {
       weights.forEach(w => weightMap[w.category_name] = w.weight_value);
       
       await computeAndStoreCandidates(id, pages, weightMap, project.scoring_mode);
-      
       setScoringStatus(null);
       
-      // ۲. ذخیره مدل انتخابی در صف و شروع
       const existingQueue = await db.analysisQueue.where('project_id').equals(id).first();
       if (existingQueue) {
         await db.analysisQueue.update(existingQueue.id!, { 
@@ -127,10 +151,11 @@ export default function ProjectPages() {
         });
       }
 
-      setIsProcessing(false); // processQueue effect will handle the rest
-    } catch (err) {
+      setIsProcessing(false);
+    } catch (err: any) {
       console.error(err);
-      setScoringStatus('خطا در آماده‌سازی عملیات');
+      setScoringStatus(null);
+      showToast({ type: 'error', message: err.message || 'خطا در ثبت و شروع تحلیل صف' });
       setIsProcessing(false);
     }
   };
@@ -139,124 +164,104 @@ export default function ProjectPages() {
   if (!project) return <div className="text-center py-20">پروژه یافت نشد.</div>;
 
   return (
-    <div className="space-y-8 animate-in fade-in duration-500 pb-20">
-      {/* Setup Modal */}
-      <AnimatePresence>
-        {showSetup && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-gray-900/60 backdrop-blur-sm">
-            <motion.div 
-              initial={{ scale: 0.9, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.9, opacity: 0 }}
-              className="bg-white rounded-[2.5rem] w-full max-w-lg overflow-hidden shadow-2xl"
-            >
-              <div className="p-8 space-y-6">
-                <div className="flex justify-between items-center border-b border-gray-100 pb-6">
-                  <div className="flex items-center gap-3">
-                    <div className="p-3 bg-blue-600 text-white rounded-2xl shadow-lg shadow-blue-200">
-                      <Brain size={24} />
-                    </div>
-                    <div>
-                      <h2 className="text-2xl font-black text-gray-900">تنظیمات تحلیل هوشمند</h2>
-                      <p className="text-xs text-gray-500 font-bold uppercase tracking-widest mt-1">AI Logic Configuration</p>
-                    </div>
-                  </div>
-                  <button onClick={() => setShowSetup(false)} className="text-gray-400 hover:text-red-500 transition-colors">
-                     <Zap size={24} />
-                  </button>
-                </div>
+    <div className="space-y-6 max-w-6xl mx-auto animate-in fade-in duration-500 pb-20">
+      {/* Breadcrumbs */}
+      <Breadcrumb items={[{ label: project.name }]} />
 
-                <div className="space-y-6">
-                  {/* Model Selection */}
-                  <div className="space-y-3">
-                    <label className="text-sm font-black text-gray-700 flex items-center gap-2">
-                      <Settings size={16} className="text-blue-500" />
-                      انتخاب موتور هوش مصنوعی (LLM)
-                    </label>
-                    <div className="grid grid-cols-1 gap-2">
-                      {[
-                        { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite', desc: 'بسیار سریع و اقتصادی (پیشنهادی)', color: 'blue' },
-                        { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash Preview', desc: 'تعادل بین سرعت و قدرت تحلیل', color: 'emerald' },
-                        { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite', desc: 'نسخه سبک کلاسیک', color: 'slate' }
-                      ].map((model) => (
-                        <button
-                          key={model.id}
-                          onClick={() => setSelectedModel(model.id)}
-                          className={`flex items-center justify-between p-4 rounded-3xl border-2 transition-all ${selectedModel === model.id ? 'border-blue-600 bg-blue-50/50' : 'border-gray-100 bg-gray-50/30 hover:border-gray-200'}`}
-                        >
-                          <div className="text-right">
-                             <div className="font-bold text-gray-900">{model.name}</div>
-                             <div className="text-[10px] text-gray-500 font-medium">{model.desc}</div>
-                          </div>
-                          {selectedModel === model.id && <div className="w-4 h-4 bg-blue-600 rounded-full shadow-[0_0_10px_rgba(37,99,235,0.5)]" />}
-                        </button>
-                      ))}
-                    </div>
+      {/* Model Selection & Parameters Modal */}
+      <Modal isOpen={showSetup} onClose={() => setShowSetup(false)} title="تنظیمات تحلیل هوشمند" size="md">
+        <div className="space-y-6">
+          {/* Model Selection Radio Group */}
+          <div className="space-y-3">
+            <label className="text-sm font-bold text-gray-700 block">
+              انتخاب موتور هوش مصنوعی (LLM)
+            </label>
+            <div className="flex flex-col gap-2.5">
+              {[
+                { id: 'gemini-3.1-flash-lite', name: 'Gemini 3.1 Flash Lite', desc: 'بسیار سریع و اقتصادی (پیشنهادی)' },
+                { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash Preview', desc: 'تعادل بین سرعت و قدرت تحلیل' },
+                { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite', desc: 'نسخه سبک کلاسیک' }
+              ].map((model) => (
+                <label
+                  key={model.id}
+                  onClick={() => setSelectedModel(model.id)}
+                  className={`flex items-center justify-between p-4 rounded-xl border-2 transition-all cursor-pointer ${
+                    selectedModel === model.id ? 'border-blue-600 bg-blue-50/50' : 'border-gray-100 bg-gray-50/30 hover:border-gray-200'
+                  }`}
+                >
+                  <div className="text-right">
+                    <div className="font-bold text-gray-900 text-sm">{model.name}</div>
+                    <div className="text-xs text-gray-500 font-medium mt-0.5">{model.desc}</div>
                   </div>
-
-                  {/* Mode Selection */}
-                  <div className="space-y-3">
-                    <label className="text-sm font-black text-gray-700 flex items-center gap-2">
-                       <BarChart2 size={16} className="text-emerald-500" />
-                       دامنه پردازش صفحات
-                    </label>
-                    <div className="flex gap-4 p-2 bg-gray-50 rounded-[1.5rem] border border-gray-100">
-                      <button 
-                        onClick={() => setAnalysisMode('pending')}
-                        className={`flex-1 py-3 px-4 rounded-xl text-center text-sm font-bold transition-all ${analysisMode === 'pending' ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
-                      >
-                         فقط صفحات بررسی نشده
-                      </button>
-                      <button 
-                        onClick={() => setAnalysisMode('all')}
-                        className={`flex-1 py-3 px-4 rounded-xl text-center text-sm font-bold transition-all ${analysisMode === 'all' ? 'bg-white text-red-600 shadow-sm' : 'text-gray-400 hover:text-gray-600'}`}
-                      >
-                         بررسی مجدد تمام صفحات (Reset)
-                      </button>
-                    </div>
-                  </div>
-                </div>
-
-                <div className="pt-4 flex gap-3">
-                  <Button onClick={handleRunAnalysis} className="flex-1 h-14 rounded-2xl bg-blue-600 hover:bg-blue-700 text-lg shadow-xl shadow-blue-100">
-                    <Zap size={20} />
-                    <span>تایید و شروع تحلیل هوشمند</span>
-                  </Button>
-                  <Button variant="secondary" onClick={() => setShowSetup(false)} className="h-14 w-14 rounded-2xl">
-                    <ChevronLeft size={24} />
-                  </Button>
-                </div>
-              </div>
-            </motion.div>
+                  <input
+                    type="radio"
+                    name="model-select"
+                    checked={selectedModel === model.id}
+                    onChange={() => setSelectedModel(model.id)}
+                    className="w-4 h-4 text-blue-600 focus:ring-blue-500 focus:ring-2 border-gray-300"
+                  />
+                </label>
+              ))}
+            </div>
           </div>
-        )}
-      </AnimatePresence>
+
+          {/* Scope selection */}
+          <div className="space-y-3">
+            <label className="text-sm font-bold text-gray-700 block">
+              دامنه پردازش صفحات
+            </label>
+            <div className="flex flex-col sm:flex-row gap-3 p-1.5 bg-gray-50 rounded-xl border border-gray-100">
+              <button 
+                onClick={() => setAnalysisMode('pending')}
+                className={`flex-1 py-2.5 px-4 rounded-lg text-center text-xs font-bold transition-all cursor-pointer ${
+                  analysisMode === 'pending' ? 'bg-white text-blue-600 shadow-xs' : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                فقط صفحات بررسی نشده
+              </button>
+              <button 
+                onClick={() => setAnalysisMode('all')}
+                className={`flex-1 py-2.5 px-4 rounded-lg text-center text-xs font-bold transition-all cursor-pointer ${
+                  analysisMode === 'all' ? 'bg-white text-red-600 shadow-xs' : 'text-gray-500 hover:text-gray-700'
+                }`}
+              >
+                بررسی مجدد تمام صفحات (Reset)
+              </button>
+            </div>
+          </div>
+
+          <div className="pt-4 flex gap-3">
+            <Button onClick={handleRunAnalysis} className="flex-1 py-3 text-sm font-bold bg-blue-600 hover:bg-blue-700 text-white shadow-md">
+              <Brain size={18} />
+              <span>تایید و شروع تحلیل هوشمند</span>
+            </Button>
+            <Button variant="secondary" onClick={() => setShowSetup(false)} className="px-5 text-sm">
+              بستن
+            </Button>
+          </div>
+        </div>
+      </Modal>
 
       {/* Header */}
       <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-        <div className="flex items-center gap-4">
-          <Link to="/" className="bg-white p-2 rounded-full border border-gray-100 hover:bg-gray-50">
-            <ArrowRight size={20} className="text-gray-400" />
-          </Link>
-          <div>
-            <h1 className="text-2xl font-bold text-gray-900">{project.name}</h1>
-            <p className="text-sm text-gray-500">داشبورد مانیتورینگ پروژه و کنترل هوش مصنوعی</p>
-          </div>
+        <div>
+          <h1 className="text-2xl font-black text-gray-900">{project.name}</h1>
+          <p className="text-sm text-gray-500 mt-0.5">داشبورد مانیتورینگ پروژه و کنترل هوش مصنوعی</p>
         </div>
-        <div className="flex gap-2 w-full md:w-auto">
+        <div className="flex flex-wrap gap-2 w-full md:w-auto">
           <Link to={`/config/${id}`}>
-            <Button variant="secondary">
-              <Settings size={18} />
+            <Button variant="secondary" className="px-3.5 py-2 text-sm">
+              <Settings size={16} />
               <span>تنظیمات پروژه</span>
             </Button>
           </Link>
-          <Button onClick={() => setShowSetup(true)} disabled={isProcessing} className="bg-gray-900 hover:bg-black text-white shadow-xl shadow-gray-200">
-            <Brain size={18} className="text-blue-400" />
+          <Button onClick={() => setShowSetup(true)} disabled={isProcessing} className="bg-gray-900 hover:bg-black text-white shadow-md px-3.5 py-2 text-sm cursor-pointer">
+            <Brain size={16} className="text-blue-400" />
             <span>تنظیم و اجرای هوش مصنوعی</span>
           </Button>
           <Link to={`/results/${id}`}>
-            <Button variant="outline" className="border-gray-200">
-              <BarChart2 size={18} className="text-emerald-500" />
+            <Button variant="outline" className="border-gray-200 px-3.5 py-2 text-sm">
+              <BarChart2 size={16} className="text-green-600" />
               <span>نتایج نهایی</span>
             </Button>
           </Link>
@@ -265,72 +270,64 @@ export default function ProjectPages() {
 
       {/* Dashboard Stats */}
       {stats && (
-        <div className="space-y-6">
-          <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
-            <motion.div 
-              whileHover={{ y: -5 }}
-              className="bg-white p-6 rounded-3xl border border-gray-100 shadow-xl shadow-gray-100/20"
-            >
-              <div className="flex items-center gap-3 mb-4">
-                <div className="p-2 bg-gray-50 rounded-xl text-gray-400">
-                  <FileText size={18} />
-                </div>
-                <div className="text-gray-400 text-[10px] font-black uppercase tracking-widest">Total Content</div>
+        <div className="space-y-5">
+          <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            <div className="bg-white p-5 rounded-2xl border border-gray-100 shadow-xs">
+              <div className="flex items-center gap-2 mb-3">
+                <FileText size={16} className="text-gray-400" />
+                <span className="text-[10px] text-gray-400 font-bold uppercase tracking-wider">کل محتوا</span>
               </div>
-              <div className="text-3xl font-black text-gray-900">{stats.total}</div>
-              <div className="text-[10px] text-gray-400 mt-2 font-bold uppercase">صفحات فعال در پروژه</div>
-            </motion.div>
+              <div className="text-2xl font-black text-gray-900">{stats.total}</div>
+              <div className="text-[10px] text-gray-400 mt-1.5 font-bold uppercase">صفحه فعال در پروژه</div>
+            </div>
 
-            <motion.div 
-              whileHover={{ y: -5 }}
-              className="bg-white p-6 rounded-3xl border border-gray-100 shadow-xl shadow-gray-100/20"
-            >
-              <div className="flex items-center gap-3 mb-4">
-                <div className="p-2 bg-emerald-50 rounded-xl text-emerald-500">
-                  <CheckCircle size={18} />
-                </div>
-                <div className="text-emerald-500 text-[10px] font-black uppercase tracking-widest">AI Analyzed</div>
+            <div className="bg-white p-5 rounded-2xl border border-gray-100 shadow-xs">
+              <div className="flex items-center gap-2 mb-3">
+                <CheckCircle size={16} className="text-green-500" />
+                <span className="text-[10px] text-green-500 font-bold uppercase tracking-wider">تحلیل هوش مصنوعی</span>
               </div>
-              <div className="text-3xl font-black text-gray-900">{stats.analyzed}</div>
-              <div className="text-[10px] text-emerald-600 mt-2 font-bold uppercase">لینک‌سازی هوشمند شده</div>
-            </motion.div>
+              <div className="text-2xl font-black text-gray-900">{stats.analyzed}</div>
+              <div className="text-[10px] text-green-600 mt-1.5 font-bold uppercase">لینک‌سازی هوشمند شده</div>
+            </div>
 
-            <motion.div 
-              whileHover={{ y: -5 }}
-              className="bg-white p-6 rounded-3xl border border-gray-100 shadow-xl shadow-gray-100/20"
-            >
-              <div className="flex items-center gap-3 mb-4">
-                <div className="p-2 bg-blue-50 rounded-xl text-blue-500">
-                  <BarChart2 size={18} />
-                </div>
-                <div className="text-blue-500 text-[10px] font-black uppercase tracking-widest">Pool Size</div>
+            <div className="bg-white p-5 rounded-2xl border border-gray-100 shadow-xs">
+              <div className="flex items-center gap-2 mb-3">
+                <BarChart2 size={16} className="text-blue-500" />
+                <span className="text-[10px] text-blue-500 font-bold uppercase tracking-wider">کاندیداها</span>
               </div>
-              <div className="text-3xl font-black text-gray-900">{stats.candidates}</div>
-              <div className="text-[10px] text-blue-600 mt-2 font-bold uppercase">کاندیداهای پردازش شده</div>
-            </motion.div>
+              <div className="text-2xl font-black text-gray-900">{stats.candidates}</div>
+              <div className="text-[10px] text-blue-600 mt-1.5 font-bold uppercase">کاندیداهای پردازش شده</div>
+            </div>
 
-            <motion.div 
-              whileHover={{ y: -5 }}
-              className="bg-white p-6 rounded-3xl border border-emerald-100 shadow-xl shadow-emerald-50 bg-emerald-50/10"
-            >
-              <div className="flex items-center gap-3 mb-4">
-                <div className="p-2 bg-emerald-500 rounded-xl text-white">
-                  <Zap size={18} />
-                </div>
-                <div className="text-emerald-900 text-[10px] font-black uppercase tracking-widest">SEO Health</div>
+            <div className="bg-green-50/20 p-5 rounded-2xl border border-green-100 shadow-xs">
+              <div className="flex items-center gap-2 mb-3">
+                <CheckCircle size={16} className="text-green-600" />
+                <span className="text-[10px] text-green-950 font-bold uppercase tracking-wider">پیشرفت سئو</span>
               </div>
-              <div className="text-3xl font-black text-emerald-600">{stats.percentage}%</div>
-              <div className="text-[10px] text-emerald-600 mt-2 font-bold uppercase">درصد پیشرفت پروژه</div>
-            </motion.div>
+              <div className="text-2xl font-black text-green-700">{stats.percentage}%</div>
+              <div className="text-[10px] text-green-600 mt-1.5 font-bold uppercase">درصد پیشرفت پروژه</div>
+            </div>
           </div>
 
-          <div className="w-full h-3 bg-gray-100 rounded-full overflow-hidden shadow-inner">
-            <motion.div 
-              initial={{ width: 0 }}
-              animate={{ width: `${stats.percentage}%` }}
-              className="h-full bg-emerald-500 shadow-[0_0_15px_rgba(16,185,129,0.5)]"
+          <div className="w-full h-2 bg-gray-100 rounded-full overflow-hidden shadow-inner">
+            <div 
+              className="h-full bg-green-500 transition-all duration-500"
+              style={{ width: `${stats.percentage}%` }}
             />
           </div>
+        </div>
+      )}
+
+      {/* Manual autoScore notice if candidatesCount is 0 */}
+      {stats !== null && stats.candidates === 0 && (
+        <div className="p-5 bg-amber-50 rounded-2xl border border-amber-100/70 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 animate-in fade-in duration-350">
+          <div className="space-y-1">
+            <h4 className="font-bold text-amber-900 text-sm">امتیازدهی کاندیداها انجام نشده است</h4>
+            <p className="text-xs text-amber-700 leading-relaxed">برای پیدا شدن کاندیداهای لینک‌سازی هوشمند، نیاز است که سیستم ابتدا امتیازدهی الگوریتمی صفحه‌ها را شبیه‌سازی کند.</p>
+          </div>
+          <Button onClick={handleComputeCandidates} className="bg-amber-600 hover:bg-amber-700 text-white shrink-0 text-xs py-2 px-4 shadow-sm cursor-pointer font-bold">
+            محاسبه امتیاز کاندیداها
+          </Button>
         </div>
       )}
 
@@ -343,15 +340,15 @@ export default function ProjectPages() {
             exit={{ opacity: 0, height: 0 }}
             className="overflow-hidden"
           >
-            <div className="p-5 bg-emerald-600 text-white rounded-3xl flex items-center justify-between shadow-lg shadow-emerald-100">
+            <div className="p-5 bg-blue-600 text-white rounded-2xl flex items-center justify-between shadow-md">
               <div className="flex items-center gap-4">
-                <Spinner size="sm" className="text-white" />
+                <Spinner size="sm" className="text-white shrink-0" />
                 <div>
                   <p className="text-sm font-bold">{scoringStatus}</p>
-                  <p className="text-[10px] opacity-70 font-medium">سیستم در حال آماده‌سازی هوشمند دیتابیس تورهاست...</p>
+                  <p className="text-xs opacity-85 mt-0.5">سیستم در حال آماده‌سازی هوشمند دیتابیس کاندیداهاست...</p>
                 </div>
               </div>
-              <Badge className="bg-white/20 text-white border-transparent">Real-time Processor</Badge>
+              <Badge className="bg-white/20 text-white border-transparent">سیستمی</Badge>
             </div>
           </motion.div>
         )}
@@ -371,37 +368,38 @@ export default function ProjectPages() {
       )}
 
       {/* Search and Content */}
-      <div className="bg-white rounded-2xl shadow-sm border border-gray-100 overflow-hidden">
+      <div className="bg-white rounded-2xl shadow-xs border border-gray-100 overflow-hidden">
         <div className="p-4 bg-gray-50/50 border-b border-gray-100">
           <div className="relative">
-            <Search className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400" size={18} />
+            <Search className="absolute right-3.5 top-1/2 -translate-y-1/2 text-gray-400" size={17} />
             <input 
               type="text" 
               placeholder="جستجوی عنوان صفحه..." 
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="w-full pl-4 pr-10 py-2.5 rounded-xl bg-white border border-gray-200 outline-none focus:ring-2 focus:ring-blue-500 transition-all"
+              className="w-full pl-4 pr-10 py-2.5 rounded-xl bg-white border border-gray-200 outline-hidden focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500 transition-all text-sm"
             />
           </div>
         </div>
 
         <div className="divide-y divide-gray-50">
-          {filteredPages.map((page, index) => {
+          {paginatedPages.map((page, index) => {
             const hasResult = results?.some(r => r.source_page_id === page.id);
-            const isCurrent = queue?.status === 'processing' && queue.current_page_index === index;
+            const globalIndex = (currentPage - 1) * itemsPerPage + index;
+            const isCurrent = queue?.status === 'processing' && queue.current_page_index === globalIndex;
 
             return (
               <Link 
                 key={page.id} 
                 to={`/project/${id}/page/${page.id}`}
-                className={`flex items-center justify-between p-4 hover:bg-gray-50 transition-colors group ${isCurrent ? 'bg-blue-50/50' : ''}`}
+                className={`flex items-center justify-between p-4 hover:bg-gray-50/70 transition-colors group ${isCurrent ? 'bg-blue-50/30' : ''}`}
               >
-                <div className="flex items-center gap-4 min-w-0">
+                <div className="flex items-center gap-3.5 min-w-0">
                   <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border ${hasResult ? 'bg-green-50 border-green-100 text-green-600' : 'bg-gray-50 border-gray-100 text-gray-400'}`}>
-                    {isCurrent ? <Spinner size="sm" /> : <FileText size={20} />}
+                    {isCurrent ? <Spinner size="sm" /> : <FileText size={18} />}
                   </div>
                   <div className="truncate">
-                    <h4 className="font-medium text-gray-900 truncate">{page.title}</h4>
+                    <h4 className="font-bold text-gray-800 text-sm truncate">{page.title}</h4>
                     <div className="flex gap-2 mt-1">
                        {hasResult && (
                          <div className="flex items-center gap-1 text-[10px] text-green-600 font-bold">
@@ -413,15 +411,65 @@ export default function ProjectPages() {
                   </div>
                 </div>
                 <div className="flex items-center gap-3">
-                  <ChevronLeft className="text-gray-300 group-hover:text-blue-500 transition-colors" size={20} />
+                  <ChevronLeft className="text-gray-300 group-hover:text-blue-500 transition-colors shrink-0" size={18} />
                 </div>
               </Link>
             );
           })}
           {filteredPages.length === 0 && (
-            <div className="py-20 text-center text-gray-400">صفحه‌ای یافت نشد.</div>
+            <div className="py-12">
+              <EmptyState 
+                icon={<Search className="w-10 h-10 text-gray-300" />} 
+                title="صفحه‌ای یافت نشد" 
+                description="هیچ صفحه‌ای با عنوان جستجو شده در این پروژه پیدا نشد. لطفاً عبارت دیگری را امتحان کنید." 
+              />
+            </div>
           )}
         </div>
+
+        {/* CSS Sliding pagination selector */}
+        {totalPages > 1 && (
+          <div className="p-4 bg-gray-50/50 border-t border-gray-100 flex flex-col sm:flex-row items-center justify-between gap-4 select-none">
+            <span className="text-xs text-gray-500 font-medium">
+              نمایش {((currentPage - 1) * itemsPerPage) + 1} تا {Math.min(currentPage * itemsPerPage, filteredPages.length)} از {filteredPages.length} صفحه
+            </span>
+            <div className="flex items-center gap-1.5">
+              <button
+                onClick={() => setCurrentPage(prev => Math.max(prev - 1, 1))}
+                disabled={currentPage === 1}
+                className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 bg-white hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+              >
+                قبلی
+              </button>
+              {Array.from({ length: totalPages }).map((_, i) => {
+                const page = i + 1;
+                if (totalPages > 6 && Math.abs(page - currentPage) > 1 && page !== 1 && page !== totalPages) {
+                  if (page === 2 || page === totalPages - 1) {
+                    return <span key={page} className="text-gray-400 text-xs px-1">...</span>;
+                  }
+                  return null;
+                }
+                const isCurrent = page === currentPage;
+                return (
+                  <button
+                    key={page}
+                    onClick={() => setCurrentPage(page)}
+                    className={`w-8 h-8 flex items-center justify-center text-xs font-bold rounded-lg transition-all ${isCurrent ? 'bg-blue-600 text-white shadow-xs' : 'border border-gray-200 bg-white hover:bg-gray-50 text-gray-600'}`}
+                  >
+                    {page}
+                  </button>
+                );
+              })}
+              <button
+                onClick={() => setCurrentPage(prev => Math.min(prev + 1, totalPages))}
+                disabled={currentPage === totalPages}
+                className="px-3 py-1.5 text-xs font-semibold rounded-lg border border-gray-200 bg-white hover:bg-gray-50 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+              >
+                بعدی
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
