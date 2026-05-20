@@ -7,6 +7,7 @@ export interface CandidateWithTags {
   score: number;           // امتیاز ۱-۱۰ (با یک رقم اعشار)
   matched_tags: string[];  // نام تگ‌های مشترک
   matched_count: number;   // تعداد تگ‌های مشترک
+  candidate_all_tags: string[]; // نام تمام تگ‌های غیرخالی کاندیدا
   rank?: number;           // رتبه براساس اولویت و امتیاز (1, 2, 3...)
 }
 
@@ -90,12 +91,17 @@ export function findTopCandidates(
     .map(p => {
       const pCat: Record<string, string | null> = safeJsonParse(p.categories, {});
       const { score, matchedTags, matchedCount } = computeNormalizedScore(sourceCat, pCat, weights, mode);
+      const candidateAllTags = Object.keys(pCat).filter(key => {
+        const val = pCat[key];
+        return val !== null && val !== undefined && val !== '';
+      });
       return {
         page_id: p.id!,
         title: p.title,
         score,
         matched_tags: matchedTags,
-        matched_count: matchedCount
+        matched_count: matchedCount,
+        candidate_all_tags: candidateAllTags
       };
     })
     .filter(c => c.score >= 1.0) // فیلتر: فقط کاندیداهایی که امتیاز حداقل ۱ دارند

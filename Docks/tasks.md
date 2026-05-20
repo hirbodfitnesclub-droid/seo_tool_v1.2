@@ -1,927 +1,185 @@
-# tasks.md — نقشه راه ریفکتورینگ UI/UX و الگوریتم
+# فاز E: اصلاح زنجیره داده کاندیداها برای تحلیل معنایی واقعی
 
-> ترتیب تسک‌ها اجباری است. هر تسک روی خروجی تسک قبلی تکیه دارد.
-> قبل از شروع هر تسک، فایل‌های CONTEXT_FILES را بخوان.
-> **قانون طلایی**: هیچ تسکی نباید همزمان فایل یکسانی را بنویسد.
-
----
-
-## فاز A: زیرساخت کامپوننت‌ها (Foundation Layer)
+> این فاز پیش‌نیاز هر بهینه‌سازی بعدی (الگوریتم یا پرامپت) است.
+> ترتیب تسک‌ها اجباری است — تسک E2 به خروجی E1 وابسته است.
 
 ---
 
-### تسک A1 — ساخت سیستم Toast شناور
+## ریشه مشکل
 
-**هدف:**
-جایگزینی پیام‌های خطا/موفقیت inline با سیستم Toast شناور که Layout Shift ایجاد نکند.
+`CandidateWithTags` در حال حاضر فقط `matched_tags` (تگ‌های **مشترک** بین منبع و کاندیدا) را نگه می‌دارد.
+این یعنی اگر کاندیدایی اشتراک مستقیمی با صفحه منبع نداشته باشد، هوش مصنوعی فقط عنوانش را می‌بیند و هیچ اطلاعاتی از ماهیت آن صفحه ندارد.
+برای اینکه AI بتواند روابط معنایی (Pillar→Cluster، تکمیل سفر کاربر) را درک کند، باید **همه تگ‌های هر کاندیدا** را هم ببیند.
 
-**راهنمای پیاده‌سازی فنی:**
-
-۱. **`src/contexts/ToastContext.tsx`** (فایل جدید):
-   - یک Context برای مدیریت لیست Toast ها
-   - هر Toast دارای: `id`، `type` (success/error/warning/info)، `message`، `duration`
-   - تابع `showToast()` برای اضافه کردن Toast جدید
-   - Toast ها بعد از `duration` میلی‌ثانیه خودکار حذف شوند
-   - **مهم**: از `setTimeout` با cleanup در `useEffect` استفاده کن تا Memory Leak نداشته باشیم
-
-۲. **`src/components/ui/Toast.tsx`** (فایل جدید):
-   - کامپوننت نمایش یک Toast
-   - موقعیت: **گوشه پایین-چپ** (`fixed bottom-4 left-4`)
-   - استایل بر اساس type:
-     - success: `bg-green-50 border-green-200 text-green-800`
-     - error: `bg-red-50 border-red-200 text-red-800`
-     - warning: `bg-amber-50 border-amber-200 text-amber-800`
-     - info: `bg-blue-50 border-blue-200 text-blue-800`
-   - آیکون مناسب برای هر type (CheckCircle, AlertCircle, AlertTriangle, Info)
-   - انیمیشن ورود: `animate-in slide-in-from-bottom-4 duration-200`
-   - انیمیشن خروج: `animate-out fade-out duration-150`
-
-۳. **`src/hooks/useToast.ts`** (فایل جدید):
-   ```ts
-   export function useToast() {
-     const context = useContext(ToastContext);
-     if (!context) throw new Error('useToast must be used within ToastProvider');
-     return context;
-   }
-   ```
-
-۴. **`src/App.tsx`** — اضافه کردن ToastProvider به root:
-   ```tsx
-   <ToastProvider>
-     <BrowserRouter>
-       ...
-     </BrowserRouter>
-   </ToastProvider>
-   ```
-
-**محدودیت‌های این تسک:**
-- ✅ Toast ها stack شوند (چند Toast همزمان)
-- ✅ حداکثر ۳ Toast همزمان نمایش داده شود
-- ✅ کلیک روی Toast آن را ببندد
-- ⛔ هنوز در صفحات استفاده نشود — فقط زیرساخت
-
-`CONTEXT_FILES: ["Docks/PROJECT.md", "Docks/ARCHITECTURE.md", "src/App.tsx"]`
-
----
-
-### تسک A2 — ساخت مودال و ConfirmDialog استاندارد
-
-**هدف:**
-ساختن کامپوننت Modal با Focus Trap و ConfirmDialog برای جایگزینی `confirm()` مرورگر.
-
-**راهنمای پیاده‌سازی فنی:**
-
-۱. **`src/components/ui/Modal.tsx`** (فایل جدید):
-   - Props: `isOpen`, `onClose`, `title`, `size` (sm/md/lg), `children`
-   - Backdrop: `bg-gray-900/60 backdrop-blur-sm`
-   - کلید `Escape` مودال را ببندد
-   - کلیک روی Backdrop مودال را ببندد
-   - **Focus Trap**: اولین عنصر focusable را focus کن
-   - آیکون بستن: **فقط `X`** (نه Zap یا هر چیز دیگر)
-   - انیمیشن: `scale-95 → scale-100` با `duration-200`
-
-۲. **`src/components/ConfirmDialog.tsx`** (فایل جدید):
-   - استفاده از Modal به عنوان base
-   - Props: `isOpen`, `onConfirm`, `onCancel`, `title`, `message`, `confirmText`, `confirmType` (danger/warning/normal), `requireTyping?`
-   - اگر `requireTyping` داده شده: input برای تایپ کلمه تایید
-   - دکمه تایید غیرفعال تا کلمه درست تایپ شود
-   - رنگ دکمه بر اساس `confirmType`:
-     - danger: `bg-red-600 hover:bg-red-700`
-     - warning: `bg-amber-500 hover:bg-amber-600`
-     - normal: `bg-blue-600 hover:bg-blue-700`
-
-**محدودیت‌های این تسک:**
-- ✅ Modal قابل استفاده مجدد باشد
-- ✅ ConfirmDialog برای عملیات مخرب (حذف پروژه) آماده باشد
-- ⛔ هنوز در صفحات استفاده نشود
-
-`CONTEXT_FILES: ["Docks/PROJECT.md", "src/components/ui/Button.tsx"]`
-
----
-
-### تسک A3 — ساخت کامپوننت‌های Input و EmptyState
-
-**هدف:**
-ساختن کامپوننت‌های UI استاندارد برای فرم‌ها و وضعیت‌های خالی.
-
-**راهنمای پیاده‌سازی فنی:**
-
-۱. **`src/components/ui/Input.tsx`** (فایل جدید):
-   - Props: `label?`, `placeholder`, `value`, `onChange`, `error?`, `helperText?`, `type`, `disabled`
-   - استایل پایه: `w-full px-4 py-3 rounded-xl border`
-   - Focus: `focus:ring-2 focus:ring-blue-500 focus:border-blue-500`
-   - Error: `border-red-300 focus:ring-red-500`
-   - Label: `text-sm font-medium text-gray-700 mb-1.5`
-   - Error message: `text-xs text-red-600 mt-1.5`
-   - Helper text: `text-xs text-gray-500 mt-1.5`
-
-۲. **`src/components/ui/EmptyState.tsx`** (فایل جدید):
-   - Props: `icon`, `title`, `description`, `action?` (دکمه CTA)
-   - طراحی: آیکون بزرگ (۶۴px) در مرکز، عنوان bold، توضیح gray-500
-   - Padding: `py-16`
-   - اگر action داده شده: Button زیر توضیح
-
-۳. **`src/components/ui/Badge.tsx`** — اضافه کردن className prop:
-   ```tsx
-   interface BadgeProps {
-     children: React.ReactNode;
-     variant?: 'blue' | 'gray' | 'green' | 'red' | 'amber';
-     className?: string;  // اضافه شود
-   }
-   ```
-
-**محدودیت‌های این تسک:**
-- ✅ Input باید RTL-friendly باشد
-- ✅ EmptyState برای جستجوی بدون نتیجه قابل استفاده باشد
-- ⛔ هنوز در صفحات استفاده نشود
-
-`CONTEXT_FILES: ["Docks/PROJECT.md", "src/components/ui/Badge.tsx", "src/components/ui/Button.tsx"]`
-
----
-
-### تسک A4 — ساخت Breadcrumb و هوک useDebounce
-
-**هدف:**
-ساختن کامپوننت ناوبری و هوک debounce برای جستجو.
-
-**راهنمای پیاده‌سازی فنی:**
-
-۱. **`src/components/Breadcrumb.tsx`** (فایل جدید):
-   - Props: `items: Array<{ label: string, href?: string }>`
-   - آخرین آیتم href ندارد و bold است
-   - جداکننده: `/` یا `>`
-   - لینک‌ها با hover:text-blue-600
-
-۲. **`src/hooks/useDebounce.ts`** (فایل جدید):
-   ```ts
-   export function useDebounce<T>(value: T, delay: number = 300): T {
-     const [debouncedValue, setDebouncedValue] = useState(value);
-     
-     useEffect(() => {
-       const timer = setTimeout(() => setDebouncedValue(value), delay);
-       return () => clearTimeout(timer);
-     }, [value, delay]);
-     
-     return debouncedValue;
-   }
-   ```
-
-۳. **`src/constants/theme.ts`** (فایل جدید):
-   ```ts
-   // رنگ‌های یکپارچه برای کل اپلیکیشن
-   export const COLORS = {
-     primary: 'blue-600',
-     primaryHover: 'blue-700',
-     success: 'green-600',
-     error: 'red-600',
-     warning: 'amber-500',
-   } as const;
-   
-   // max-width یکپارچه برای تمام صفحات
-   export const CONTAINER_WIDTH = 'max-w-6xl';
-   ```
-
-**محدودیت‌های این تسک:**
-- ✅ useDebounce با cleanup صحیح
-- ✅ Breadcrumb با RTL support
-- ⛔ هنوز در صفحات استفاده نشود
-
-`CONTEXT_FILES: ["Docks/PROJECT.md"]`
-
----
-
-## فاز B: بهبود الگوریتم امتیازدهی
-
----
-
-### تسک B1 — سیستم امتیازدهی ۱-۱۰
-
-**هدف:**
-تغییر سیستم امتیازدهی از «تعداد تگ‌های مشترک» به «امتیاز نرمالایز شده ۱-۱۰» برای رتبه‌بندی بهتر کاندیداها.
-
-**راهنمای پیاده‌سازی فنی:**
-
-۱. **`src/utils/scorer.ts`** — بازنویسی کامل:
-
-   **Interface جدید:**
-   ```ts
-   export interface CandidateWithTags {
-     page_id: number;
-     title: string;
-     score: number;           // امتیاز ۱-۱۰ (با یک رقم اعشار)
-     matched_tags: string[];  // نام تگ‌های مشترک
-     matched_count: number;   // تعداد تگ‌های مشترک
-   }
-   ```
-
-   **تابع جدید `computeNormalizedScore`:**
-   ```ts
-   function computeNormalizedScore(
-     sourceCategories: Record<string, string | null>,
-     candidateCategories: Record<string, string | null>,
-     weights: Record<string, number>,
-     mode: 'linear' | 'weighted'
-   ): { score: number; matchedTags: string[]; matchedCount: number } {
-     
-     const matchedTags: string[] = [];
-     
-     // یافتن تگ‌های مشترک
-     Object.keys(sourceCategories).forEach(key => {
-       const sourceVal = sourceCategories[key];
-       const candidateVal = candidateCategories[key];
-       if (sourceVal && candidateVal && sourceVal === candidateVal) {
-         matchedTags.push(key);
-       }
-     });
-     
-     const matchedCount = matchedTags.length;
-     
-     // شمارش تگ‌های غیرنال صفحه منبع
-     const nonNullSourceTags = Object.values(sourceCategories).filter(v => v !== null).length;
-     
-     let score: number;
-     
-     if (mode === 'linear') {
-       // خطی: نسبت ساده
-       score = (matchedCount / Math.max(nonNullSourceTags, 1)) * 10;
-     } else {
-       // وزن‌دار: مجموع وزن‌های مشترک / مجموع وزن‌های صفحه منبع
-       let matchedWeight = 0;
-       let totalWeight = 0;
-       
-       matchedTags.forEach(tag => {
-         matchedWeight += weights[tag] || 1;
-       });
-       
-       Object.keys(sourceCategories).forEach(key => {
-         if (sourceCategories[key] !== null) {
-           totalWeight += weights[key] || 1;
-         }
-       });
-       
-       score = (matchedWeight / Math.max(totalWeight, 1)) * 10;
-     }
-     
-     // گرد کردن به یک رقم اعشار
-     score = Math.round(score * 10) / 10;
-     
-     return { score, matchedTags, matchedCount };
-   }
-   ```
-
-   **تغییر در `findTopCandidates`:**
-   - فیلتر: فقط کاندیداهایی که `score >= 1.0` دارند
-   - مرتب‌سازی: اول بر اساس `score` نزولی، سپس بر اساس `matched_count` نزولی
-   - خروجی: آرایه با ساختار جدید
-
-۲. **تست دستی:**
-   - صفحه‌ای با ۱۰ تگ غیرنال داریم
-   - کاندیدایی با ۵ تگ مشترک باید امتیاز `5.0` بگیرد (حالت linear)
-   - کاندیدایی با ۱۰ تگ مشترک باید امتیاز `10.0` بگیرد
-
-**محدودیت‌های این تسک:**
-- ✅ توابع قبلی (`getMatchedTags`, `computeScore`) حذف شوند
-- ✅ Type ها دقیق باشند (نه `any`)
-- ⛔ صفحات UI هنوز تغییر نکنند
-
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/utils/scorer.ts", "src/constants/categories.ts"]`
-
----
-
-### تسک B2 — بروزرسانی candidateStorage و gemini.ts
-
-**هدف:**
-تطبیق دادن توابع ذخیره‌سازی و پرامپت AI با سیستم امتیازدهی جدید.
-
-**راهنمای پیاده‌سازی فنی:**
-
-۱. **`src/utils/candidateStorage.ts`** — بروزرسانی:
-   - استفاده از `CandidateWithTags` جدید
-   - ذخیره `matched_count` در `candidate_list`
-
-۲. **`src/utils/gemini.ts`** — تغییر پرامپت:
-   ```ts
-   export function buildSinglePagePrompt(
-     sourcePage: { title: string; categories: object },
-     candidates: CandidateWithTags[]  // حداکثر ۳۰ تا
-   ): string {
-     
-     // فقط ۳۰ کاندیدای برتر به AI ارسال می‌شود
-     const top30 = candidates.slice(0, 30);
-     
-     return `
-   تو یک متخصص SEO و معمار محتوا هستی. وظیفه تو انتخاب ۱۵ لینک داخلی برتر از بین ۳۰ کاندیدای پیشنهادی است.
-
-   استراتژی انتخاب:
-   1. اولویت اول: کاندیداهایی با امتیاز بالاتر (نزدیک‌تر به ۱۰)
-   2. اولویت دوم: تعداد تگ‌های مشترک بیشتر
-   3. اولویت سوم: ارتباط معنایی و تکمیل‌کنندگی سفر کاربر
-
-   دستورالعمل حیاتی:
-   - دقیقاً ۱۵ لینک انتخاب کن (نه کمتر، نه بیشتر)
-   - لینک‌ها را به ترتیب اولویت شماره‌گذاری کن (۱ = مهم‌ترین)
-   - برای هر لینک یک دلیل ۱ خطی بنویس
-
-   خروجی را فقط به صورت JSON معتبر برگردان:
-   {
-     "selected_links": [
-       { "rank": 1, "page_id": 12, "title": "...", "reason": "..." },
-       { "rank": 2, "page_id": 45, "title": "...", "reason": "..." }
-     ]
-   }
-
-   --- صفحه اصلی ---
-   عنوان: ${sourcePage.title}
-   اطلاعات: ${JSON.stringify(sourcePage.categories)}
-
-   --- ۳۰ کاندیدای برتر (به ترتیب امتیاز) ---
-   ${top30.map((c, i) => `${i + 1}. [ID: ${c.page_id}] ${c.title} | امتیاز: ${c.score}/10 | تگ‌های مشترک: ${c.matched_count} (${c.matched_tags.join(', ')})`).join('\n')}
-   `;
-   }
-   ```
-
-۳. **`src/utils/queueProcessor.ts`** — رفع Race Condition:
-   - اضافه کردن `processingRef` برای جلوگیری از اجرای همزمان
-   - بهبود error handling
-
-**محدودیت‌های این تسک:**
-- ✅ AI حداکثر ۳۰ کاندیدا دریافت کند
-- ✅ AI دقیقاً ۱۵ لینک برگرداند
-- ✅ لینک‌ها شماره‌گذاری شوند (rank)
-- ⛔ صفحات UI هنوز تغییر نکنند
-
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/utils/scorer.ts", "src/utils/gemini.ts", "src/utils/candidateStorage.ts", "src/utils/queueProcessor.ts"]`
-
----
-
-## فاز C: اصلاحات صفحات اصلی
-
----
-
-### تسک C1 — اصلاح Home.tsx
-
-**هدف:**
-جایگزینی `confirm()` با ConfirmDialog و بهبود کارت‌های پروژه.
-
-**راهنمای پیاده‌سازی فنی:**
-
-۱. **`src/pages/Home.tsx`**:
-   - اضافه کردن state برای `deleteDialogOpen` و `projectToDelete`
-   - جایگزینی `confirm()` با `ConfirmDialog`:
-     ```tsx
-     <ConfirmDialog
-       isOpen={deleteDialogOpen}
-       onConfirm={handleConfirmDelete}
-       onCancel={() => setDeleteDialogOpen(false)}
-       title="حذف پروژه"
-       message={`آیا از حذف پروژه "${projectToDelete?.name}" و تمام داده‌های آن مطمئن هستید؟`}
-       confirmText="Delete"
-       confirmType="danger"
-       requireTyping="Delete"
-     />
-     ```
-   - استفاده از Toast برای نمایش نتیجه حذف
-
-۲. **`src/components/ProjectCard.tsx`**:
-   - جداسازی بصری دکمه حذف از سایر دکمه‌ها
-   - دکمه حذف: آیکون کوچکتر، رنگ خاکستری، hover:red
-   - دکمه‌های اصلی: رنگ آبی، بزرگتر
-
-**محدودیت‌های این تسک:**
-- ✅ هیچ `confirm()` باقی نماند
-- ✅ Toast برای نتیجه عملیات
-- ⛔ منطق حذف تغییر نکند
-
-`CONTEXT_FILES: ["src/pages/Home.tsx", "src/components/ProjectCard.tsx", "src/components/ConfirmDialog.tsx", "src/hooks/useToast.ts"]`
-
----
-
-### تسک C2 — اصلاح ProjectPages.tsx (بخش اول: UI)
-
-**هدف:**
-رفع مشکلات UI شامل آیکون Zap، دکمه‌های Radio، و Layout یکپارچه.
-
-**راهنمای پیاده‌سازی فنی:**
-
-۱. **آیکون بستن مودال:**
-   - جایگزینی `<Zap />` با `<X />` برای بستن مودال Setup
-
-۲. **انتخاب نوع تحلیل (دامنه پردازش):**
-   - جایگزینی دکمه‌های رنگی با Radio Group:
-     ```tsx
-     <div className="space-y-2">
-       <label className="flex items-center gap-3 p-3 rounded-xl border cursor-pointer hover:bg-gray-50">
-         <input type="radio" name="analysisMode" checked={analysisMode === 'pending'} onChange={() => setAnalysisMode('pending')} />
-         <div>
-           <span className="font-medium">فقط صفحات بررسی نشده</span>
-           <p className="text-xs text-gray-500">ادامه از جایی که متوقف شده</p>
-         </div>
-       </label>
-       <label className="flex items-center gap-3 p-3 rounded-xl border cursor-pointer hover:bg-gray-50">
-         <input type="radio" name="analysisMode" checked={analysisMode === 'all'} onChange={() => setAnalysisMode('all')} />
-         <div>
-           <span className="font-medium">بررسی مجدد همه صفحات</span>
-           <p className="text-xs text-gray-500">نتایج قبلی پاک می‌شود</p>
-         </div>
-       </label>
-     </div>
-     ```
-
-۳. **یکپارچه‌سازی Container Width:**
-   - جایگزینی `max-w-7xl` یا هر چیز دیگر با `max-w-6xl`
-
-۴. **اضافه کردن Breadcrumb:**
-   ```tsx
-   <Breadcrumb items={[
-     { label: 'داشبورد', href: '/' },
-     { label: project.name }
-   ]} />
-   ```
-
-۵. **بهبود جستجو با Debounce:**
-   ```tsx
-   const debouncedSearchTerm = useDebounce(searchTerm, 300);
-   const filteredPages = useMemo(() => {
-     if (!pages) return [];
-     return pages.filter(p => p.title.toLowerCase().includes(debouncedSearchTerm.toLowerCase()));
-   }, [pages, debouncedSearchTerm]);
-   ```
-
-**محدودیت‌های این تسک:**
-- ✅ آیکون Zap حذف شود
-- ✅ Radio Group جایگزین دکمه‌های رنگی شود
-- ✅ Debounce برای جستجو
-- ⛔ منطق پردازش تغییر نکند
-
-`CONTEXT_FILES: ["src/pages/ProjectPages.tsx", "src/components/Breadcrumb.tsx", "src/hooks/useDebounce.ts"]`
-
----
-
-### تسک C3 — اصلاح ProjectPages.tsx (بخش دوم: منطق)
-
-**هدف:**
-حذف autoScore خودکار و اضافه کردن Pagination.
-
-**راهنمای پیاده‌سازی فنی:**
-
-۱. **حذف autoScore از useEffect:**
-   - کامنت یا حذف کامل بلاک `useEffect` که `autoScore` را اجرا می‌کند
-   - امتیازدهی الگوریتمی **فقط** با دکمه "تحلیل هوشمند" اجرا شود
-
-۲. **رفع Race Condition در processQueue:**
-   - اضافه کردن ref برای track کردن اجرای فعلی:
-     ```tsx
-     const isProcessingRef = useRef(false);
-     
-     useEffect(() => {
-       if (queue?.status === 'processing' && !isProcessingRef.current) {
-         isProcessingRef.current = true;
-         processQueue(id)
-           .catch(console.error)
-           .finally(() => {
-             isProcessingRef.current = false;
-             setIsProcessing(false);
-           });
-       }
-     }, [queue?.status, id]);
-     ```
-
-۳. **اضافه کردن Pagination:**
-   ```tsx
-   const ITEMS_PER_PAGE = 50;
-   const [currentPage, setCurrentPage] = useState(1);
-   
-   const paginatedPages = useMemo(() => {
-     const start = (currentPage - 1) * ITEMS_PER_PAGE;
-     return filteredPages.slice(start, start + ITEMS_PER_PAGE);
-   }, [filteredPages, currentPage]);
-   
-   const totalPagesCount = Math.ceil(filteredPages.length / ITEMS_PER_PAGE);
-   ```
-   
-   UI Pagination:
-   ```tsx
-   {totalPagesCount > 1 && (
-     <div className="flex justify-center gap-2 py-4">
-       <Button variant="secondary" disabled={currentPage === 1} onClick={() => setCurrentPage(p => p - 1)}>
-         قبلی
-       </Button>
-       <span className="px-4 py-2 text-sm text-gray-600">
-         صفحه {currentPage} از {totalPagesCount}
-       </span>
-       <Button variant="secondary" disabled={currentPage === totalPagesCount} onClick={() => setCurrentPage(p => p + 1)}>
-         بعدی
-       </Button>
-     </div>
-   )}
-   ```
-
-۴. **بهبود Empty State:**
-   ```tsx
-   {filteredPages.length === 0 && (
-     <EmptyState
-       icon={<Search size={48} />}
-       title="صفحه‌ای یافت نشد"
-       description="عبارت جستجو را تغییر دهید یا فیلترها را بردارید."
-     />
-   )}
-   ```
-
-**محدودیت‌های این تسک:**
-- ✅ autoScore خودکار حذف شود
-- ✅ Race Condition رفع شود
-- ✅ Pagination کار کند
-- ⛔ UI کارت‌ها تغییر نکند
-
-`CONTEXT_FILES: ["src/pages/ProjectPages.tsx", "src/components/ui/EmptyState.tsx"]`
-
----
-
-### تسک C4 — اصلاح PageDetail.tsx (بخش اول: UI)
-
-**هدف:**
-یکپارچه‌سازی تم، رفع مشکل آیکون Trash، و بهبود Layout.
-
-**راهنمای پیاده‌سازی فنی:**
-
-۱. **یکپارچه‌سازی Container Width:**
-   - جایگزینی `max-w-[1400px]` با `max-w-6xl`
-
-۲. **رفع تم دارک در ستون سمت راست (Page Attributes):**
-   - جایگزینی `bg-gray-900` با `bg-white border border-gray-200`
-   - متن‌ها: `text-gray-900` بجای `text-white`
-   - زیرعنوان‌ها: `text-gray-500` بجای `text-gray-400`
-
-۳. **جایگزینی آیکون Trash2 با X برای deselect:**
-   ```tsx
-   <button onClick={() => setSelectedLinks(selectedLinks.filter(l => l.page_id !== link.page_id))}>
-     <X size={18} />  {/* بجای Trash2 */}
-   </button>
-   ```
-
-۴. **حذف tracking-widest از متن فارسی:**
-   - جستجو و حذف `tracking-widest` از تمام عناصر متنی فارسی
-
-۵. **اضافه کردن Breadcrumb:**
-   ```tsx
-   <Breadcrumb items={[
-     { label: 'داشبورد', href: '/' },
-     { label: project?.name || '', href: `/project/${pId}` },
-     { label: page.title }
-   ]} />
-   ```
-
-۶. **بهبود انیمیشن‌ها:**
-   - جایگزینی `duration-500` و `duration-700` با `duration-200` یا `duration-300`
-
-**محدودیت‌های این تسک:**
-- ✅ تم یکپارچه شود
-- ✅ آیکون Trash2 با X جایگزین شود
-- ✅ tracking-widest حذف شود
-- ⛔ منطق ذخیره تغییر نکند
-
-`CONTEXT_FILES: ["src/pages/PageDetail.tsx", "src/components/Breadcrumb.tsx"]`
-
----
-
-### تسک C5 — اصلاح PageDetail.tsx (بخش دوم: Toast و Unsaved)
-
-**هدف:**
-جایگزینی پیام‌های inline با Toast و اضافه کردن نشانگر Unsaved Changes.
-
-**راهنمای پیاده‌سازی فنی:**
-
-۱. **جایگزینی پیام خطا/موفقیت با Toast:**
-   - حذف متغیر `error` و UI مربوط به آن
-   - استفاده از `showToast`:
-     ```tsx
-     const { showToast } = useToast();
-     
-     // در handleAIAnalysis:
-     showToast({ type: 'success', message: 'تحلیل هوشمند با موفقیت انجام شد' });
-     // یا
-     showToast({ type: 'error', message: err.message });
-     
-     // در handleSaveManual:
-     showToast({ type: 'success', message: 'تغییرات ذخیره شد' });
-     ```
-
-۲. **رفع Memory Leak در setTimeout:**
-   - حذف `setTimeout(() => setError(null), 3000)`
-   - Toast خودش Timeout دارد
-
-۳. **اضافه کردن نشانگر Unsaved Changes:**
-   ```tsx
-   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
-   
-   // هر وقت selectedLinks تغییر کرد:
-   useEffect(() => {
-     if (result) {
-       const originalLinks = JSON.parse(result.recommended_links);
-       const isChanged = JSON.stringify(originalLinks) !== JSON.stringify(selectedLinks);
-       setHasUnsavedChanges(isChanged);
-     }
-   }, [selectedLinks, result]);
-   
-   // نمایش در UI:
-   {hasUnsavedChanges && (
-     <Badge variant="amber" className="animate-pulse">
-       تغییرات ذخیره نشده
-     </Badge>
-   )}
-   ```
-
-۴. **Confirmation قبل از ترک صفحه:**
-   ```tsx
-   useEffect(() => {
-     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-       if (hasUnsavedChanges) {
-         e.preventDefault();
-         e.returnValue = '';
-       }
-     };
-     window.addEventListener('beforeunload', handleBeforeUnload);
-     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
-   }, [hasUnsavedChanges]);
-   ```
-
-**محدودیت‌های این تسک:**
-- ✅ پیام‌های inline حذف شوند
-- ✅ Toast جایگزین شود
-- ✅ Memory Leak رفع شود
-- ✅ Unsaved indicator کار کند
-
-`CONTEXT_FILES: ["src/pages/PageDetail.tsx", "src/hooks/useToast.ts"]`
-
----
-
-### تسک C6 — اصلاح Results.tsx
-
-**هدف:**
-جدول ریسپانسیو و بهبود Empty State.
-
-**راهنمای پیاده‌سازی فنی:**
-
-۱. **جدول ریسپانسیو:**
-   - در موبایل: جدول به کارت تبدیل شود
-   ```tsx
-   {/* Desktop */}
-   <div className="hidden md:block overflow-x-auto">
-     <table>...</table>
-   </div>
-   
-   {/* Mobile */}
-   <div className="md:hidden space-y-4">
-     {filteredResults.map(result => (
-       <div className="bg-white p-4 rounded-xl border space-y-3">
-         <h4 className="font-bold">{result.source_title}</h4>
-         <div className="flex gap-2">
-           <Badge>{links.length} لینک</Badge>
-           <Badge>{result.is_manual_edit ? 'دستی' : 'هوشمند'}</Badge>
-         </div>
-         {/* expandable links */}
-       </div>
-     ))}
-   </div>
-   ```
-
-۲. **یکپارچه‌سازی Container Width:**
-   - اضافه کردن `max-w-6xl mx-auto` به container اصلی
-
-۳. **بهبود Empty State:**
-   - استفاده از کامپوننت `EmptyState`
-
-۴. **اضافه کردن Breadcrumb:**
-   ```tsx
-   <Breadcrumb items={[
-     { label: 'داشبورد', href: '/' },
-     { label: project?.name || '', href: `/project/${projectId}` },
-     { label: 'نتایج نهایی' }
-   ]} />
-   ```
-
-**محدودیت‌های این تسک:**
-- ✅ جدول در موبایل کارت شود
-- ✅ Breadcrumb اضافه شود
-- ⛔ منطق export تغییر نکند
-
-`CONTEXT_FILES: ["src/pages/Results.tsx", "src/components/Breadcrumb.tsx", "src/components/ui/EmptyState.tsx"]`
-
----
-
-### تسک C7 — اصلاح Config.tsx و NewProject.tsx
-
-**هدف:**
-یکپارچه‌سازی Layout و بهبود UX فرم‌ها.
-
-**راهنمای پیاده‌سازی فنی:**
-
-۱. **`src/pages/Config.tsx`**:
-   - جایگزینی `max-w-4xl` با `max-w-6xl`
-   - اضافه کردن Breadcrumb
-   - استفاده از کامپوننت Input استاندارد برای API Key
-   - Toast برای ذخیره موفق
-
-۲. **`src/pages/NewProject.tsx`**:
-   - جایگزینی `max-w-3xl` با `max-w-6xl`
-   - اضافه کردن Breadcrumb
-   - **محدودیت حجم فایل:**
-     ```tsx
-     const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB
-     
-     if (selectedFile.size > MAX_FILE_SIZE) {
-       showToast({ type: 'error', message: 'حداکثر حجم فایل ۵ مگابایت است' });
-       return;
-     }
-     ```
-   - بهبود Spinner برای پردازش CSV
-   - Toast برای نتیجه عملیات
-
-**محدودیت‌های این تسک:**
-- ✅ Layout یکپارچه شود
-- ✅ محدودیت حجم فایل اضافه شود
-- ⛔ منطق پارس CSV تغییر نکند
-
-`CONTEXT_FILES: ["src/pages/Config.tsx", "src/pages/NewProject.tsx", "src/components/Breadcrumb.tsx", "src/hooks/useToast.ts"]`
-
----
-
-## فاز D: امنیت و بهینه‌سازی
-
----
-
-### تسک D1 — بهبود امنیت و Type Safety
-
-**هدف:**
-رفع مشکلات امنیتی و بهبود TypeScript types.
-
-**راهنمای پیاده‌سازی فنی:**
-
-۱. **Sanitize داده‌های CSV:**
-   - در `src/utils/csvParser.ts`:
-     ```ts
-     function sanitizeString(str: string): string {
-       return str
-         .replace(/</g, '&lt;')
-         .replace(/>/g, '&gt;')
-         .replace(/"/g, '&quot;')
-         .replace(/'/g, '&#39;');
-     }
-     
-     // استفاده در پارس CSV:
-     rows.push({
-       title: sanitizeString(row['عنوان_H1'] || ''),
-       categories: JSON.stringify(sanitizedCategories)
-     });
-     ```
-
-۲. **Safe JSON.parse:**
-   - ساخت utility function:
-     ```ts
-     // src/utils/safeJson.ts
-     export function safeJsonParse<T>(str: string, fallback: T): T {
-       try {
-         return JSON.parse(str);
-       } catch {
-         console.error('Failed to parse JSON:', str);
-         return fallback;
-       }
-     }
-     ```
-   - جایگزینی `JSON.parse` های مستقیم با `safeJsonParse`
-
-۳. **حذف any:**
-   - در `src/components/ProjectCard.tsx`: تعریف interface `ProjectCardProps`
-   - در `src/utils/scorer.ts`: تایپ دقیق برای categories
-   - در `src/hooks/useProject.ts`: handle `undefined` projectId
-
-۴. **بهبود Badge:**
-   - اضافه کردن `className` prop که در تسک A3 تعریف شد
-
-**محدودیت‌های این تسک:**
-- ✅ XSS prevention
-- ✅ Safe JSON parsing
-- ✅ Type safety
-- ⛔ رفتار برنامه تغییر نکند
-
-`CONTEXT_FILES: ["src/utils/csvParser.ts", "src/utils/scorer.ts", "src/components/ProjectCard.tsx", "src/hooks/useProject.ts"]`
-
----
-
-### تسک D2 — بهبود Performance
-
-**هدف:**
-رفع مشکلات عملکردی شامل JSON.parse در useMemo و کوئری‌های اضافی.
-
-**راهنمای پیاده‌سازی فنی:**
-
-۱. **کش کردن JSON.parse در Results.tsx:**
-   ```tsx
-   const parsedResults = useMemo(() => {
-     if (!results) return [];
-     return results.map(r => ({
-       ...r,
-       links: safeJsonParse(r.recommended_links, [])
-     }));
-   }, [results]);
-   
-   // استفاده در stats:
-   const stats = useMemo(() => {
-     if (parsedResults.length === 0) return null;
-     const totalLinks = parsedResults.reduce((sum, r) => sum + r.links.length, 0);
-     return { ... };
-   }, [parsedResults]);
-   ```
-
-۲. **بهبود کوئری ProjectCard:**
-   - در `src/pages/Home.tsx`:
-     ```tsx
-     // یک کوئری برای همه page counts
-     const pageCounts = useLiveQuery(async () => {
-       const counts = new Map<number, number>();
-       if (!projects) return counts;
-       for (const p of projects) {
-         counts.set(p.id!, await db.pages.where('project_id').equals(p.id!).count());
-       }
-       return counts;
-     }, [projects]);
-     
-     // پاس دادن count به ProjectCard
-     <ProjectCard project={project} pageCount={pageCounts?.get(project.id!) || 0} />
-     ```
-
-۳. **کاهش انیمیشن‌ها برای لیست‌های بزرگ:**
-   - در ProjectPages: غیرفعال کردن `whileHover={{ y: -5 }}` اگر تعداد صفحات > ۵۰
-
-**محدودیت‌های این تسک:**
-- ✅ JSON.parse فقط یک بار اجرا شود
-- ✅ کوئری‌های Dexie کاهش یابد
-- ⛔ UI تغییر نکند
-
-`CONTEXT_FILES: ["src/pages/Results.tsx", "src/pages/Home.tsx", "src/components/ProjectCard.tsx", "src/pages/ProjectPages.tsx"]`
-
----
-
-### تسک D3 — تست نهایی و Cleanup
-
-**هدف:**
-بررسی نهایی، حذف کدهای اضافی، و تست کامل.
-
-**راهنمای پیاده‌سازی فنی:**
-
-۱. **چک‌لیست بررسی نهایی:**
-   - [ ] هیچ `confirm()` باقی نمانده
-   - [ ] هیچ `tracking-widest` روی متن فارسی نیست
-   - [ ] هیچ آیکون `Zap` برای بستن مودال نیست
-   - [ ] هیچ آیکون `Trash2` برای deselect نیست
-   - [ ] تمام صفحات `max-w-6xl` دارند
-   - [ ] تمام صفحات Breadcrumb دارند
-   - [ ] تمام جستجوها Debounce دارند
-   - [ ] Toast ها کار می‌کنند
-   - [ ] Modal ها با Escape بسته می‌شوند
-   - [ ] امتیازدهی ۱-۱۰ درست کار می‌کند
-   - [ ] AI ۳۰ کاندیدا می‌گیرد و ۱۵ برمی‌گرداند
-
-۲. **حذف کدهای اضافی:**
-   - حذف `console.log` های debug
-   - حذف کامنت‌های TODO قدیمی
-   - حذف import های استفاده نشده
-
-۳. **بررسی Accessibility:**
-   - اضافه کردن `aria-label` به دکمه‌های آیکونی
-   - اضافه کردن `role` به المان‌های interactive
-
-**محدودیت‌های این تسک:**
-- ✅ تمام آیتم‌های چک‌لیست تایید شوند
-- ✅ کدهای اضافی حذف شوند
-- ⛔ هیچ فیچر جدید اضافه نشود
-
-`CONTEXT_FILES: ["Docks/PROJECT.md", "Docks/ARCHITECTURE.md"]`
-
----
-
-## خلاصه وابستگی‌ها
+## زنجیره داده کامل (برای درک وابستگی‌ها)
 
 ```
-A1 (Toast) ─────────────────────────────────────────┐
-A2 (Modal) ─────────────────────────────────────────┤
-A3 (Input/Empty) ───────────────────────────────────┼──► C1, C2, C3, C4, C5, C6, C7
-A4 (Breadcrumb/Debounce) ───────────────────────────┤
-                                                    │
-B1 (Scorer) ───────────────────────────────────────┬┤
-B2 (Gemini/Queue) ─────────────────────────────────┘│
-                                                    │
-C1 (Home) ──────────────────────────────────────────┤
-C2 (ProjectPages UI) ───────────────────────────────┤
-C3 (ProjectPages Logic) ────────────────────────────┼──► D1, D2, D3
-C4 (PageDetail UI) ─────────────────────────────────┤
-C5 (PageDetail Toast) ──────────────────────────────┤
-C6 (Results) ───────────────────────────────────────┤
-C7 (Config/New) ────────────────────────────────────┘
+scorer.ts → findTopCandidates() → CandidateWithTags[]
+    ↓
+candidateStorage.ts → JSON.stringify() → ذخیره در DB (جدول candidates)
+    ↓
+queueProcessor.ts → safeJsonParse() → CandidateWithTags[] → buildSinglePagePrompt()
+    ↓
+gemini.ts → buildSinglePagePrompt() → پرامپت نهایی به AI
+
+همچنین موازی:
+PageDetail.tsx → safeJsonParse(candidateRec.candidate_list) → نمایش CandidateCard
 ```
 
-**توالی اجرا:**
-1. فاز A (تسک‌های ۱-۴) — موازی قابل اجرا
-2. فاز B (تسک‌های ۱-۲) — بعد از A، موازی قابل اجرا
-3. فاز C (تسک‌های ۱-۷) — بعد از A و B
-4. فاز D (تسک‌های ۱-۳) — بعد از C
+**نکته مهم:** چون `candidateStorage.ts` از `JSON.stringify` روی کل آبجکت استفاده می‌کند، اضافه کردن فیلد جدید در `scorer.ts` به‌طور خودکار در DB هم ذخیره خواهد شد — این فایل نیاز به تغییر ندارد.
+
+---
+
+## تسک E1 — اصلاح `scorer.ts`: اضافه کردن `candidate_all_tags`
+
+**هدف:** تزریق کل تگ‌های معتبر هر کاندیدا به اینترفیس و خروجی الگوریتم.
+
+**فایل:** `src/utils/scorer.ts`
+
+### تغییر ۱ — اینترفیس `CandidateWithTags`
+
+فیلد `candidate_all_tags` را به اینترفیس اضافه کن:
+
+```typescript
+export interface CandidateWithTags {
+  page_id: number;
+  title: string;
+  score: number;
+  matched_tags: string[];   // تگ‌های مشترک با صفحه منبع (بدون تغییر)
+  matched_count: number;
+  candidate_all_tags: string[]; // 👈 فیلد جدید: نام تمام تگ‌های غیرخالی کاندیدا
+  rank?: number;
+}
+```
+
+### تغییر ۲ — تابع `findTopCandidates`
+
+در بلاک `.map(p => { ... })` داخل این تابع، بعد از فراخوانی `computeNormalizedScore`، استخراج کل تگ‌های کاندیدا را اضافه کن:
+
+```typescript
+// استخراج نام تمام تگ‌هایی که مقدار غیرخالی دارند
+const candidateAllTags = Object.keys(pCat).filter(key => {
+  const val = pCat[key];
+  return val !== null && val !== undefined && val !== '';
+});
+```
+
+و در آبجکت return، فیلد جدید را اضافه کن:
+
+```typescript
+return {
+  page_id: p.id!,
+  title: p.title,
+  score,
+  matched_tags: matchedTags,
+  matched_count: matchedCount,
+  candidate_all_tags: candidateAllTags  // 👈 اضافه شد
+};
+```
+
+**⚠️ نکته:** فیلد `rank` در همان تابع بعد از sort اضافه می‌شود (در `.map((c, index) => ({...c, rank: index + 1}))`). مطمئن شو که spread operator (`...c`) این فیلد جدید را هم منتقل می‌کند — چون از spread استفاده می‌شود، به‌طور خودکار منتقل خواهد شد.
+
+**محدودیت‌های این تسک:**
+- ✅ فقط `scorer.ts` تغییر کند
+- ✅ تایپ `CandidateWithTags` در همه جا به‌روز شود (TypeScript خودش خطا می‌دهد اگر جایی استفاده نادرست باشد)
+- ⛔ منطق امتیازدهی (`computeNormalizedScore`) تغییر نکند
+- ⛔ فایل‌های دیگر (candidateStorage، queueProcessor، PageDetail) تغییر نکنند
+
+`CONTEXT_FILES: ["src/utils/scorer.ts", "src/db.ts"]`
+
+---
+
+## تسک E2 — اصلاح `gemini.ts`: بازنویسی پرامپت با دیتای کامل
+
+**پیش‌نیاز:** تسک E1 کامل شده باشد.
+
+**هدف:** جایگزینی پرامپت فعلی با نسخه‌ای که:
+1. از `candidate_all_tags` (کل تگ‌ها) + `matched_tags` (نقطه اتصال) استفاده کند
+2. فریم‌بندی استراتژیک SEO داشته باشد (Pillar-Cluster، قیف فروش)
+3. امتیاز و ترتیب الگوریتمی **کاملاً حذف** شده باشند تا AI مستقلاً رتبه‌بندی کند
+
+**فایل:** `src/utils/gemini.ts`
+
+### تغییر — تابع `buildSinglePagePrompt`
+
+تابع فعلی را کامل با نسخه زیر جایگزین کن:
+
+```typescript
+export function buildSinglePagePrompt(
+  sourcePage: { title: string; categories: string },
+  candidates: CandidateWithTags[]
+): string {
+  const top30 = candidates.slice(0, 30);
+
+  // پارس و فرمت‌بندی فشرده تگ‌های صفحه منبع
+  let sourceTags: Record<string, string | null> = {};
+  try { sourceTags = JSON.parse(sourcePage.categories); } catch { /* ignore */ }
+
+  const sourceTagsStr = Object.entries(sourceTags)
+    .filter(([, v]) => v !== null && v !== '')
+    .map(([k, v]) => `${k.replace(/_/g, ' ')}: ${v}`)
+    .join(' | ');
+
+  // فرمت‌بندی کاندیداها با دو لایه اطلاعاتی:
+  // all_tags: تصویر کلان (ماهیت صفحه کاندیدا)
+  // shared_with_source: نقطه اتصال (چه چیزی مشترک است)
+  const candidateLines = top30.map((c, i) =>
+    `${i + 1}. {"page_id": ${c.page_id}, "title": "${c.title}", "all_tags": "${c.candidate_all_tags.join(', ')}", "shared_with_source": "${c.matched_tags.join(', ') || 'None'}"}`
+  ).join('\n');
+
+  return `تو یک معمار ارشد محتوا و متخصص سئو در حوزه گردشگری هستی.
+ما در حال پیاده‌سازی یک استراتژی قدرتمند لینک‌سازی داخلی (Topical Mapping) هستیم.
+هدف اصلی ما: ساخت شبکه‌ای از لینک‌هاست که سلسله‌مراتب صفحات (Pillar and Cluster) را به گوگل نشان دهد و کاربر را در طول قیف فروش (از جستجوی کلی تا خرید تور خاص) هدایت کند.
+وظیفه تو: بررسی ${top30.length} کاندیدای زیر و انتخاب ۱۵ لینک برتر برای صفحه مبدا، با نادیده گرفتن کامل ترتیب فعلی لیست.
+
+اصول ریشه‌ای و استراتژی انتخاب (بسیار مهم):
+۱. حمایت از ساختار والد-فرزند: لینک دادن بین صفحات خاص (مثل تورهای ماهانه/فصلی) و صفحات جامع (مثل تور اصلی مقصد) به شدت توصیه می‌شود.
+۲. تکمیل سفر کاربر: لینک باید نیاز بعدی یا قبلی مسافر را پاسخ دهد (مثلاً از هتل‌های کیش به تور کیش، یا از تور کیش به راهنمای سفر کیش).
+۳. تنوع هدف (Search Intent): ترکیبی از لینک‌های بالادستی (جامع‌تر)، پایین‌دستی (جزئی‌تر) و هم‌عرض (مقاصد یا تورهای مشابه) را انتخاب کن تا شبکه محتوایی کامل شود.
+۴. پرهیز از keyword cannibalization: صفحات بیش از حد مشابه که با هم رقابت می‌کنند انتخاب نشوند.
+
+دستورالعمل خروجی:
+- دقیقاً ۱۵ لینک برتر را انتخاب کن (اگر لیست کمتر بود، همه را بیاور).
+- آن‌ها را از ۱ (مهم‌ترین و استراتژیک‌ترین) تا ۱۵ رتبه‌بندی کن.
+- برای هر انتخاب، ۱ خط دلیل منطقی سئویی به زبان فارسی روان بنویس.
+- خروجی فقط و فقط یک JSON معتبر بدون هیچ متن یا فرمت‌بندی اضافه باشد.
+
+{"selected_links":[{"rank":1,"page_id":0,"title":"...","reason":"..."}]}
+
+--- صفحه مبدا ---
+عنوان: ${sourcePage.title}
+مشخصات: ${sourceTagsStr}
+
+--- ${top30.length} کاندیدا جهت تحلیل معنایی و رتبه‌بندی ---
+${candidateLines}`;
+}
+```
+
+**محدودیت‌های این تسک:**
+- ✅ فقط تابع `buildSinglePagePrompt` تغییر کند
+- ✅ توابع `buildPrompt` و `callGemini` دست نخورند
+- ⛔ امتیاز (`score`) یا ترتیب الگوریتمی (`rank`) به هیچ شکلی در پرامپت ظاهر نشود
+- ⛔ اگر `candidate_all_tags` روی یک آیتم undefined بود، باید gracefully handle شود:
+  `c.candidate_all_tags?.join(', ') || c.matched_tags.join(', ') || 'نامشخص'`
+
+`CONTEXT_FILES: ["src/utils/gemini.ts", "src/utils/scorer.ts"]`
+
+---
+
+## چک‌لیست تأیید نهایی
+
+بعد از هر دو تسک، این موارد را بررسی کن:
+
+- [ ] `tsc --noEmit` بدون خطا اجرا شود (type safety حفظ شده باشد)
+- [ ] در `PageDetail.tsx` که از `CandidateWithTags` استفاده می‌کند، هیچ خطای TypeScript نباشد
+- [ ] در `queueProcessor.ts` که `safeJsonParse(candidateRecord.candidate_list, [])` را صدا می‌زند، داده‌های قدیمی DB (که `candidate_all_tags` ندارند) با fallback خالی `[]` gracefully handle شوند
+- [ ] بعد از ذخیره پروژه جدید، یک کاندیدای نمونه از DB بخوان و مطمئن شو `candidate_all_tags` در JSON ذخیره شده است
+- [ ] پرامپت نهایی `console.log` شود و تأیید شود که هیچ عدد امتیازی در آن نیست
+
+---
+
+## نکته مهم درباره داده‌های قدیمی DB
+
+کاندیداهایی که **قبل از این اصلاح** محاسبه و ذخیره شده‌اند، فیلد `candidate_all_tags` را ندارند.
+بنابراین بعد از deploy این تغییر، باید در صفحه پروژه دکمه **«محاسبه مجدد امتیاز کاندیداها»** زده شود تا DB با ساختار جدید بازنویسی شود.
+این یک عملیات یک‌بار است و نیاز به تغییر کد اضافه ندارد.
