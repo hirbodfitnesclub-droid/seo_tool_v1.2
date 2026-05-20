@@ -10,6 +10,11 @@ interface CandidateCardProps {
     score: number;
     matched_tags: string[];
     rank?: number;
+    scoreDetails?: {
+      tagScore: number;
+      jaccardScore: number;
+      titleScore: number;
+    };
   };
   isSelected: boolean;
   onToggle: () => void;
@@ -73,6 +78,14 @@ export const CandidateCard: React.FC<CandidateCardProps> = ({ candidate, isSelec
               <span className="text-[9px] text-gray-400 font-medium pt-0.5">+{candidate.matched_tags.length - 2} تگ مشترک</span>
             )}
           </div>
+
+          {candidate.scoreDetails && (
+            <div className="text-[9px] text-gray-400 bg-gray-50/50 p-1.5 rounded-lg border border-gray-100/55 mt-2 flex items-center justify-between font-mono">
+              <span className="font-sans">تگ: <strong className="text-blue-600 font-mono">{candidate.scoreDetails.tagScore?.toFixed(1)}</strong></span>
+              <span className="font-sans">جکارد: <strong className="text-blue-600 font-mono">{candidate.scoreDetails.jaccardScore?.toFixed(1)}</strong></span>
+              <span className="font-sans">عنوان: <strong className="text-blue-600 font-mono">{candidate.scoreDetails.titleScore?.toFixed(1)}</strong></span>
+            </div>
+          )}
         </div>
         
         {/* حباب وضعیت انتخاب هماهنگ با رنگ برند اصلی */}

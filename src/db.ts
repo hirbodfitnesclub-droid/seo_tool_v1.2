@@ -54,6 +54,14 @@ export interface Result {
   generated_at: string;
 }
 
+// جدول کش IDF
+export interface IDFCacheRecord {
+  id?: number;
+  project_id: number;
+  idf_map: string; // JSON.stringify شده از IDFMap
+  computed_at: string;
+}
+
 export class LinkMeshDB extends Dexie {
   projects!: Table<Project>;
   pages!: Table<Page>;
@@ -61,17 +69,19 @@ export class LinkMeshDB extends Dexie {
   candidates!: Table<CandidateRecord>; // اضافه شدن جدول کاندیداها
   results!: Table<Result>;
   analysisQueue!: Table<AnalysisQueue>; // اضافه شدن جدول صف پردازش
+  idfCache!: Table<IDFCacheRecord>; // اضافه شد جدید برای کش IDF
 
   constructor() {
     super('LinkMeshDB');
-    // ارتقا به نسخه ۲
-    this.version(2).stores({
+    // ارتقا به نسخه ۳
+    this.version(3).stores({
       projects: '++id, name, created_at',
       pages: '++id, project_id, title',
       weights: '++id, project_id, category_name',
       candidates: '++id, project_id, source_page_id',
       results: '++id, project_id, source_page_id',
-      analysisQueue: '++id, project_id'
+      analysisQueue: '++id, project_id',
+      idfCache: '++id, project_id' // اضافه شد
     });
   }
 }

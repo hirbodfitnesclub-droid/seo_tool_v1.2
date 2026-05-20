@@ -1,135 +1,180 @@
-import { Page } from '../db';
-import { safeJsonParse } from './safeJson';
+import { PARTIAL_MATCH_COEFFICIENTS, isNeighborMonth, isNeighborSeason } from '../constants/timeNeighbors';
+import { titleSimilarity, TITLE_SIMILARITY_WEIGHT } from './titleSimilarity';
+import { type IDFMap, getIDF } from './idfCalculator';
 
+// ساختار خروجی هر کاندیدا
 export interface CandidateWithTags {
   page_id: number;
   title: string;
-  score: number;           // امتیاز ۱-۱۰ (با یک رقم اعشار)
-  matched_tags: string[];  // نام تگ‌های مشترک
-  matched_count: number;   // تعداد تگ‌های مشترک
-  candidate_all_tags: string[]; // نام تمام تگ‌های غیرخالی کاندیدا
-  rank?: number;           // رتبه براساس اولویت و امتیاز (1, 2, 3...)
+  score: number;
+  matchedTags: string[];
+  matched_tags: string[];       // رونوشت برای سازگاری کامل با بخش‌های دیگر سیستم
+  candidate_all_tags: string[];  // نام تمام تگ‌های غیرخالی کاندیدا
+  scoreDetails?: {
+    tagScore: number;
+    jaccardScore: number;
+    titleScore: number;
+  };
 }
 
-/**
- * محاسبه امتیاز نرمالایز شده ۱-۱۰ بین کاندیدا و منبع
- */
-export function computeNormalizedScore(
-  sourceCategories: Record<string, string | null>,
-  candidateCategories: Record<string, string | null>,
+// نوع categories
+type CategoriesMap = Record<string, string | null>;
+
+// فیلدهایی که Partial Match دارند
+const MONTH_FIELD = 'ماه_تقویمی_برگزاری';
+const SEASON_FIELD = 'فصل_برگزاری';
+
+// محاسبه امتیاز یک جفت صفحه
+export function computeAdvancedScore(
+  sourceCat: CategoriesMap,
+  candidateCat: CategoriesMap,
+  sourceTitle: string,
+  candidateTitle: string,
   weights: Record<string, number>,
+  idfMap: IDFMap,
   mode: 'linear' | 'weighted'
-): { score: number; matchedTags: string[]; matchedCount: number } {
+): { score: number; matchedTags: string[]; details: Required<CandidateWithTags>['scoreDetails'] } {
   
+  let tagScore = 0;
   const matchedTags: string[] = [];
   
-  // یافتن تگ‌های مشترک
-  Object.keys(sourceCategories).forEach(key => {
-    const sourceVal = sourceCategories[key];
-    const candidateVal = candidateCategories[key];
-    if (
-      sourceVal !== null && sourceVal !== undefined && sourceVal !== '' &&
-      candidateVal !== null && candidateVal !== undefined && candidateVal !== '' &&
-      sourceVal === candidateVal
-    ) {
-      matchedTags.push(key);
+  // شمارش فیلدهای غیرnull برای Jaccard
+  const sourceNonNullFields: string[] = [];
+  const candidateNonNullFields: string[] = [];
+  let exactMatchCount = 0;
+  
+  // ۱. امتیاز تگ‌ها با IDF و Partial Match
+  for (const field of Object.keys(sourceCat)) {
+    const srcVal = sourceCat[field];
+    const candVal = candidateCat[field];
+    
+    // شمارش فیلدهای غیرnull
+    if (srcVal !== null && srcVal !== undefined && srcVal !== '') {
+      sourceNonNullFields.push(field);
     }
-  });
-  
-  const matchedCount = matchedTags.length;
-  
-  // شمارش تگ‌های غیرنال صفحه منبع
-  const nonNullSourceTags = Object.keys(sourceCategories).filter(key => {
-    const val = sourceCategories[key];
-    return val !== null && val !== undefined && val !== '';
-  }).length;
-  
-  let score = 0;
-  
-  if (mode === 'linear') {
-    // خطی: نسبت ساده تگ‌های مشترک به کل تگ‌های غیرنال صفحه منبع ضربدر ۱۰
-    score = (matchedCount / Math.max(nonNullSourceTags, 1)) * 10;
-  } else {
-    // وزن‌دار: مجموع وزن‌های مشترک / مجموع وزن‌های صفحه منبع ضربدر ۱۰
-    let matchedWeight = 0;
-    let totalWeight = 0;
+    if (candVal !== null && candVal !== undefined && candVal !== '') {
+      candidateNonNullFields.push(field);
+    }
     
-    matchedTags.forEach(tag => {
-      matchedWeight += weights[tag] ?? 1;
-    });
+    // اگر یکی null بود، skip
+    if (
+      srcVal === null || srcVal === undefined || srcVal === '' ||
+      candVal === null || candVal === undefined || candVal === ''
+    ) {
+      continue;
+    }
     
-    Object.keys(sourceCategories).forEach(key => {
-      const val = sourceCategories[key];
-      if (val !== null && val !== undefined && val !== '') {
-        totalWeight += weights[key] ?? 1;
-      }
-    });
+    const baseWeight = mode === 'linear' ? 1 : (weights[field] ?? 1);
+    const idf = getIDF(idfMap, field, srcVal);
     
-    score = (matchedWeight / Math.max(totalWeight, 1)) * 10;
+    // تطابق دقیق
+    if (srcVal === candVal) {
+      tagScore += baseWeight * idf * PARTIAL_MATCH_COEFFICIENTS.EXACT;
+      matchedTags.push(field);
+      exactMatchCount++;
+    }
+    // Partial Match برای ماه
+    else if (field === MONTH_FIELD && isNeighborMonth(srcVal, candVal)) {
+      tagScore += baseWeight * idf * PARTIAL_MATCH_COEFFICIENTS.NEIGHBOR_MONTH;
+      matchedTags.push(`${field}(مجاور)`);
+    }
+    // Partial Match برای فصل
+    else if (field === SEASON_FIELD && isNeighborSeason(srcVal, candVal)) {
+      tagScore += baseWeight * idf * PARTIAL_MATCH_COEFFICIENTS.NEIGHBOR_SEASON;
+      matchedTags.push(`${field}(مجاور)`);
+    }
   }
   
-  if (score > 0 && score < 1.0) {
-    score = 1.0;
-  }
+  // ۲. Jaccard Bidirectional
+  const union = new Set([...sourceNonNullFields, ...candidateNonNullFields]).size;
+  const jaccardScore = union > 0 ? (exactMatchCount / union) * 10 : 0;
   
-  // گرد کردن به یک رقم اعشار
-  score = Math.round(score * 10) / 10;
+  // ۳. Title Similarity
+  const titleScore = titleSimilarity(sourceTitle, candidateTitle) * TITLE_SIMILARITY_WEIGHT;
   
-  return { score, matchedTags, matchedCount };
+  // ۴. امتیاز نهایی
+  const finalScore = tagScore + jaccardScore + titleScore;
+  
+  return {
+    score: Math.round(finalScore * 100) / 100,
+    matchedTags,
+    details: {
+      tagScore: Math.round(tagScore * 100) / 100,
+      jaccardScore: Math.round(jaccardScore * 100) / 100,
+      titleScore: Math.round(titleScore * 100) / 100
+    }
+  };
 }
 
+// پیدا کردن بهترین کاندیداها برای یک صفحه
 export function findTopCandidates(
-  sourcePage: Page,
-  allPages: Page[],
+  sourcePage: { id: number; title: string; categories: string },
+  allPages: { id: number; title: string; categories: string }[],
   weights: Record<string, number>,
+  idfMap: IDFMap,
   mode: 'linear' | 'weighted'
 ): CandidateWithTags[] {
-  const sourceCat: Record<string, string | null> = safeJsonParse(sourcePage.categories, {});
   
-  const sortedCandidates = allPages
+  let sourceCat: CategoriesMap = {};
+  try {
+    sourceCat = JSON.parse(sourcePage.categories);
+  } catch {
+    // fallback
+  }
+  
+  return allPages
+    // خود صفحه را حذف کن
     .filter(p => p.id !== sourcePage.id)
+    // امتیاز هر کاندیدا را حساب کن
     .map(p => {
-      const pCat: Record<string, string | null> = safeJsonParse(p.categories, {});
-      const { score, matchedTags, matchedCount } = computeNormalizedScore(sourceCat, pCat, weights, mode);
+      let pCat: CategoriesMap = {};
+      try {
+        pCat = JSON.parse(p.categories);
+      } catch {
+        // fallback
+      }
+      
+      const { score, matchedTags, details } = computeAdvancedScore(
+        sourceCat, pCat,
+        sourcePage.title, p.title,
+        weights, idfMap, mode
+      );
+      
       const candidateAllTags = Object.keys(pCat).filter(key => {
         const val = pCat[key];
         return val !== null && val !== undefined && val !== '';
       });
+      
       return {
-        page_id: p.id!,
+        page_id: p.id,
         title: p.title,
         score,
-        matched_tags: matchedTags,
-        matched_count: matchedCount,
-        candidate_all_tags: candidateAllTags
+        matchedTags,
+        matched_tags: matchedTags, // دابلیکیت برای سازگاری کامل
+        candidate_all_tags: candidateAllTags,
+        scoreDetails: details
       };
     })
-    .filter(c => c.score >= 1.0) // فیلتر: فقط کاندیداهایی که امتیاز حداقل ۱ دارند
-    .sort((a, b) => {
-      // مرتب‌سازی: اول بر اساس امتیاز نزولی، سپس بر اساس تعداد تگ‌های مشترک نزولی
-      if (b.score !== a.score) {
-        return b.score - a.score;
-      }
-      return b.matched_count - a.matched_count;
-    });
-
-  // شماره‌گذاری ترتیبی ۱، ۲، ۳... براساس رتبه و اولویت
-  return sortedCandidates.map((c, index) => ({
-    ...c,
-    rank: index + 1
-  }));
+    // فقط کسانی که امتیاز مثبت دارند
+    .filter(c => c.score > 0)
+    // مرتب‌سازی نزولی بر اساس امتیاز
+    .sort((a, b) => b.score - a.score);
 }
 
+// محاسبه کاندیداها برای تمام صفحات
 export function computeAllCandidates(
-  pages: Page[],
+  pages: { id: number; title: string; categories: string }[],
   weights: Record<string, number>,
+  idfMap: IDFMap,
   mode: 'linear' | 'weighted'
 ): Map<number, CandidateWithTags[]> {
+  
   const map = new Map<number, CandidateWithTags[]>();
   
-  pages.forEach(p => {
-    map.set(p.id!, findTopCandidates(p, pages, weights, mode));
-  });
+  for (const page of pages) {
+    const candidates = findTopCandidates(page, pages, weights, idfMap, mode);
+    map.set(page.id, candidates);
+  }
   
   return map;
 }
