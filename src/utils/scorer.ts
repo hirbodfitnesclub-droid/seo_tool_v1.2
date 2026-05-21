@@ -266,13 +266,81 @@ export function computeBaseScore(catA: any, catB: any, weights: Record<string, n
   return score;
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// توابع معین و کمکی جدید برای استخراج و فیلتر ویژگی‌های الگوریتм آپدیت شده
+// ─────────────────────────────────────────────────────────────────────────────
+
 /**
- * تابع ۵: پیدا کردن کاندیداها با منطق چندلایه
- * 
- * لایه ۱: فیلتر Hard فصلی/زمانی → حذف صفحات نامعتبر
- * لایه ۲: امتیاز پایه → وزن تگ‌های مشترک
- * لایه ۳: بونوس‌ها → مبدا و مقصد
- * لایه ۴: مرتب‌سازی → بر اساس امتیاز کل
+ * تجزیه و استخراج دقیق لیست مقاصد/جزایر مقصد (پشتیبانی از تورهای ترکیبی)
+ */
+function parseDestinations(categories: any): string[] {
+  const dest = categories?.['شهر_یا_جزیره_مقصد'];
+  if (!dest) return [];
+  // تفکیک مقاصد بر اساس خط فاصله (-)، ویرگول (،) یا ترجیحاً واژه ربط "و" با فواصل مناسب
+  return String(dest)
+    .split(/[\s,，、۔،\-و]+\s*/)
+    .map((s: string) => s.trim())
+    .filter((s: string) => s.length > 0 && s !== 'و' && s !== 'تا');
+}
+
+/**
+ * تشخیص هوشمند وجود مبدا در عنوان H1 یا دسته بندی ها
+ */
+function extractOrigin(title: string, categories: any): string | null {
+  if (categories && categories['شهر_یا_استان_مبدا']) {
+    return String(categories['شهر_یا_استان_مبدا']).trim();
+  }
+  // کشف کلمه کلیدی " از " در عنوان صفحه (از نوع "تور مشهد از اصفهان")
+  if (title.includes(" از ")) {
+    const parts = title.split(" از ");
+    if (parts.length > 1) {
+      const firstWordAfterAz = parts[1].trim().split(/\s+/)[0];
+      return firstWordAfterAz.replace(/[\(\)\{\}\[\]]/g, '').trim();
+    }
+  }
+  return null;
+}
+
+/**
+ * تشخیص هوشمند صفحات اصلی مقصد (دسته ۱ یا صفحات پیلار عمومی)
+ */
+function isPillarPage(title: string, categories: any): boolean {
+  // صفحه اصلی مقصد یا پیلار، فاقد شهر مبدأ (یا ساختار " از ") است
+  const hasOrigin = title.includes(" از ") || !!categories?.['شهر_یا_استان_مبدا'];
+  
+  // فاقد ماه یا فصل خاصی است
+  const hasTime = !!categories?.['ماه_تقویمی_برگزاری'] || !!categories?.['فصل_برگزاری'] ||
+    PERSIAN_MONTHS_ORDER.some(m => title.includes(m)) ||
+    ['بهار', 'تابستان', 'پاییز', 'زمستان'].some(s => title.includes(s)) ||
+    title.includes("نوروز");
+    
+  // فاقد هتل مشخصی در عنوان است
+  const hasHotel = title.includes("هتل") || !!categories?.['نام_دقیق_هتل'];
+  
+  // فاقد وضعیت تورهای ترکیبی است
+  const isCombined = categories?.['نوع_تور']?.includes("ترکیبی") || title.includes("ترکیبی");
+  
+  return !hasOrigin && !hasTime && !hasHotel && !isCombined;
+}
+
+/**
+ * استخراج ستاره هتل از عنوان یا متادیتا
+ */
+function getStarRating(title: string, categories: any): number | null {
+  const starsRaw = categories?.['تعداد_ستاره_هتل'];
+  if (starsRaw) {
+    const parsed = parseInt(String(starsRaw).replace(/[^\d]/g, ''), 10);
+    if (!isNaN(parsed) && parsed >= 1 && parsed <= 5) return parsed;
+  }
+  if (title.includes("۵ ستاره") || title.includes("5 ستاره")) return 5;
+  if (title.includes("۴ ستاره") || title.includes("4 ستاره")) return 4;
+  if (title.includes("۳ ستاره") || title.includes("3 ستاره")) return 3;
+  if (title.includes("۲ ستاره") || title.includes("2 ستاره")) return 2;
+  return null;
+}
+
+/**
+ * تابع ۵: پیدا کردن کاندیداها با الگوریتم بسیار پیشرفته جدید ۵ مرحله‌ای
  */
 export function findTopCandidates(
   sourcePage: any, 
@@ -299,10 +367,22 @@ export function findTopCandidates(
     sourceCat = sourcePage.categories || {};
   }
   
+  const sourceTitle = sourcePage.title;
+  
+  // ─── مرحله ۱: تجزیه موجودیت‌های منبع (ENTITY PARSING - SOURCE) ───
+  const sourceDests = parseDestinations(sourceCat);
+  const sourceOrigin = extractOrigin(sourceTitle, sourceCat);
+  const sourceMonth = sourceCat['ماه_تقویمی_برگزاری'] ? normalizeMonth(sourceCat['ماه_تقویمی_برگزاری']) : null;
+  const sourceSeason = getEffectiveSeason(sourceCat);
+  const sourceHotel = sourceCat['نام_دقیق_هتل']?.trim();
+  const sourceIsCheap = sourceTitle.includes("ارزان") || (sourceCat['برچسب_کلاسی_تور']?.includes("ارزان"));
+  const sourceIsLuxury = sourceTitle.includes("لوکس") || (sourceCat['برچسب_کلاسی_تور']?.includes("لوکس")) || sourceTitle.includes("لاکچری");
+  const sourceHasSpecificHotel = !!sourceHotel || (sourceTitle.includes("هتل ") && !sourceTitle.includes("هتل‌های") && !sourceTitle.includes("ستاره"));
+
   const candidates: CandidateWithTags[] = [];
   
   for (const page of allPages) {
-    // اسکیپ خود صفحه
+    // صرف‌نظر کردن از خود صفحه منبع
     if (page.id === sourcePage.id) continue;
     
     let pageCat: any = {};
@@ -316,48 +396,152 @@ export function findTopCandidates(
       pageCat = page.categories || {};
     }
     
-    // لایه ۱: فیلتر Hard فصلی/زمانی
-    if (!isValidSeasonalMatch(sourceCat, pageCat)) {
-      continue; // حذف کامل
+    const candTitle = page.title;
+    
+    // ─── مرحله ۱: تجزیه موجودیت‌های کاندیدا (ENTITY PARSING - CANDIDATE) ───
+    const candDests = parseDestinations(pageCat);
+    const candOrigin = extractOrigin(candTitle, pageCat);
+    const candMonth = pageCat['ماه_تقویمی_برگزاری'] ? normalizeMonth(pageCat['ماه_تقویمی_برگزاری']) : null;
+    const candSeason = getEffectiveSeason(pageCat);
+    const candHotel = pageCat['نام_دقیق_هتل']?.trim();
+    
+    // بررسی تطابق‌های پایه‌ای
+    const rawSourceDest = sourceCat['شهر_یا_جزیره_مقصد']?.trim();
+    const rawCandDest = pageCat['شهر_یا_جزیره_مقصد']?.trim();
+    
+    const hasSharedDest = (sourceDests.length > 0 && candDests.length > 0 && sourceDests.some(d => candDests.includes(d))) ||
+      (!!rawSourceDest && !!rawCandDest && rawSourceDest === rawCandDest);
+      
+    const isOriginMatch = !!sourceOrigin && !!candOrigin && sourceOrigin === candOrigin;
+    const isTimeMatch = (sourceMonth && candMonth && sourceMonth === candMonth) ||
+      (sourceSeason && candSeason && sourceSeason === candSeason);
+    const isHotelMatch = !!sourceHotel && !!candHotel && sourceHotel === candHotel;
+    
+    // ─── مرحله ۲: قانون حاکم (THE ABSOLUTE OVERRIDE - PILLAR RULE) ───
+    let pillarBonus = 0;
+    if (isPillarPage(candTitle, pageCat) && hasSharedDest) {
+      pillarBonus = 1000;
     }
     
-    // لایه ۲: امتیاز پایه
-    const baseScore = computeBaseScore(sourceCat, pageCat, weights, mode);
+    // ─── مرحله ۳: تخصیص وزن‌های پایه (BASE FALLBACK HIERARCHY) ───
+    let destinationScore = hasSharedDest ? 100 : 0;
+    let timeScore = isTimeMatch ? 60 : 0;
+    let originScore = isOriginMatch ? 50 : 0;
+    let hotelScore = isHotelMatch ? 30 : 0;
     
-    // لایه ۳: بونوس‌ها
-    const { originBonus, destinationBonus } = calculateBonuses(sourceCat, pageCat);
+    const baseFallbackScore = destinationScore + timeScore + originScore + hotelScore;
     
-    // لایه ۳.۵: بونوس تشابه متنی عنوان (Jaccard) برای دقت سئویی نهایی
+    // ─── مرحله ۴: ماتریس‌های بونوس و جریمه هوشمند (SMART MATRICES) ───
+    
+    // الف) ماتریس زمان (Time Logic)
+    let timeLogicBonus = 0;
+    if (sourceMonth) {
+      const srcIdx = PERSIAN_MONTHS_ORDER.indexOf(sourceMonth);
+      const candIdx = candMonth ? PERSIAN_MONTHS_ORDER.indexOf(candMonth) : -1;
+      
+      if (hasSharedDest) {
+        // کاندیدا مربوط به همان تور در ماه بعد باشد
+        if (candMonth && srcIdx !== -1 && candIdx !== -1) {
+          const isNextMonth = candIdx === (srcIdx + 1) % 12;
+          if (isNextMonth) {
+            timeLogicBonus += 40;
+          }
+        }
+        
+        // کاندیدا مربوط به همان تور در فصل فعلی (اما ماه‌های دیگر) باشد
+        if (sourceSeason && candSeason && sourceSeason === candSeason && candMonth !== sourceMonth) {
+          timeLogicBonus += 25;
+        }
+      }
+      
+      // قانون ماه آخر فصلی به فصل آینده
+      const lastMonthsOfSeasons = ['خرداد', 'شهریور', 'آذر', 'اسفند'];
+      const seasonSequence = ['بهار', 'تابستان', 'پاییز', 'زمستان'];
+      if (lastMonthsOfSeasons.includes(sourceMonth)) {
+        const srcSeqIdx = seasonSequence.indexOf(sourceSeason || '');
+        if (srcSeqIdx !== -1) {
+          const nextSeason = seasonSequence[(srcSeqIdx + 1) % 4];
+          if (candSeason === nextSeason) {
+            timeLogicBonus += 20;
+          }
+        }
+      }
+    }
+    
+    // ب) ماتریس جغرافیایی (Geo Expansion)
+    let geoExpansionBonus = 0;
+    const isSameCountry = sourceCat['کشور_مقصد'] && pageCat['کشور_مقصد'] && 
+      String(sourceCat['کشور_مقصد']).trim() === String(pageCat['کشور_مقصد']).trim();
+      
+    if (!hasSharedDest && isSameCountry && isTimeMatch) {
+      geoExpansionBonus = 45;
+    }
+    
+    // ج) ماتریس کلاس و بودجه (Budget & Class Alignment)
+    let budgetClassScore = 0;
+    const candStars = getStarRating(candTitle, pageCat);
+    const candIsLuxury = candTitle.includes("لوکس") || (pageCat['برچسب_کلاسی_تور']?.includes("لوکس")) || candTitle.includes("لاکچری");
+    const candIsCheap = candTitle.includes("ارزان") || (pageCat['برچسب_کلاسی_تور']?.includes("ارزان"));
+    
+    if (sourceIsCheap) {
+      if (candStars === 3 || candIsCheap) {
+        budgetClassScore += 20;
+      } else if (candStars === 5 || candIsLuxury) {
+        budgetClassScore -= 50;
+      }
+    } else if (sourceIsLuxury) {
+      if (candStars === 5 || candIsLuxury) {
+        budgetClassScore += 20;
+      } else if (candStars === 3 || candIsCheap) {
+        budgetClassScore -= 50;
+      }
+    }
+    
+    // د) ماتریس جایگزینی هتل (Hotel Fallback)
+    let hotelFallbackBonus = 0;
+    if (sourceHasSpecificHotel && !isHotelMatch && hasSharedDest) {
+      // بررسی اینکه آیا کاندیدا از نوع دسته‌بندی ستاره‌ای هتل‌های همان مقصد است
+      const isStarCategoryCand = !candHotel && (candTitle.includes("هتل‌های") || candTitle.includes("ستاره") || !!pageCat['تعداد_ستاره_هتل']);
+      const candHasSpecificHotel = !!candHotel || (candTitle.includes("هتل") && !isStarCategoryCand);
+      
+      if (isStarCategoryCand) {
+        hotelFallbackBonus = 15;
+      } else if (candHasSpecificHotel) {
+        hotelFallbackBonus = 5;
+      }
+    }
+    
+    // هـ) ماتریس مبدأ در برابر لجستیک (Origin vs. Transport)
+    // بر اساس قانون ۴: تطابق دقیق مبدأ (isOriginMatch) امتیاز ۵۰+ خود را کامل می‌گیرد.
+    // تغییر وسیله نقلیه (هوایی، زمینی، قطار) هیچ جریمه‌ای در پی ندارد. بدین ترتیب سیستم،
+    // "تور مشهد از اهواز هوایی" را بسیار بالاتر از "تور مشهد از تهران با قطار" برای کاربر اهوازی رتبه‌دهی می‌کند.
+    
+    // بونوس جزئی تشابه عنوان (Jaccard) سئو برای تفکیک بهتر در صورت تشابه کامل گزینه‌ها
     const similarity = titleSimilarity(sourcePage.title, page.title);
-    const titleScoreBoost = similarity * 4; // حداکثر ۴ امتیاز تشویقی برای عناوین بسیار مشابه
+    const titleScoreBoost = similarity * 2; // حداکثر ۲ امتیاز تشویقی
     
-    // لایه ۳.۷: جریمه‌های زمانی برای اولویت ماه‌های گذشته و چرخه‌های قبلی
-    const temporalPenalty = computeTemporalPenalty(sourceCat, pageCat);
+    // ─── مرحله ۵: محاسبه نهایی و رتبه‌بندی (SUMMATION & SORTING) ───
+    let totalScore = pillarBonus + baseFallbackScore + timeLogicBonus + geoExpansionBonus + budgetClassScore + hotelFallbackBonus + titleScoreBoost;
     
-    // امتیاز نهایی = پایه + بونوس زمان/مکان + بونوس تشابه عنوان - جریمه‌های زمانی
-    let totalScore = baseScore + originBonus + destinationBonus + titleScoreBoost - temporalPenalty;
     if (totalScore <= 0) {
-      totalScore = 0.05; // به هیچ وجه فیزیکی حذف نمی‌شوند بلکه اولویت فوق‌العاده اندکی می‌گیرند
+      totalScore = 0.05; // به هیچ وجه فیزیکی حذف نمی‌شوند بلکه رتبه پایین می‌گیرند
     }
     totalScore = parseFloat(totalScore.toFixed(2));
     
-    // فقط صفحات با تطابق مثبت و مجاز محتوایی
-    if (totalScore > 0) {
-      const matched = getMatchedTags(sourceCat, pageCat);
-      candidates.push({
-        page_id: page.id!,
-        title: page.title,
-        score: totalScore,
-        matched_tags: matched,
-        matchedTags: matched,
-        origin_bonus: originBonus,
-        destination_bonus: destinationBonus,
-        categories: pageCat
-      });
-    }
+    const matched = getMatchedTags(sourceCat, pageCat);
+    candidates.push({
+      page_id: page.id!,
+      title: page.title,
+      score: totalScore,
+      matched_tags: matched,
+      matchedTags: matched,
+      origin_bonus: isOriginMatch ? 50 : 0,
+      destination_bonus: hasSharedDest ? 100 : 0,
+      categories: pageCat
+    });
   }
   
-  // لایه ۴: مرتب‌سازی نهایی
+  // ردیابی و مرتب‌سازی نزولی کاندیداها
   candidates.sort((a, b) => b.score - a.score);
   
   return candidates;
