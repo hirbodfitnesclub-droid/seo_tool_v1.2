@@ -68,7 +68,26 @@ export default function PageDetail() {
   const handleAIAnalysis = async () => {
     setAnalyzing(true);
     try {
-      const prompt = buildSinglePagePrompt({ title: page!.title, categories: page!.categories }, candidateList);
+      // غنی‌سازی کاندیداها به صورت بلادرنگ از روی جدول صفحات دیتابیس برای فرستادن اطلاعات کامل تگ‌ها به هوش مصنوعی
+      const top30 = candidateList.slice(0, 30);
+      const enrichedCandidates = await Promise.all(top30.map(async (cand: any) => {
+        const fullPage = await db.pages.get(cand.page_id);
+        if (fullPage) {
+          try {
+            return {
+              ...cand,
+              categories: typeof fullPage.categories === 'string'
+                ? JSON.parse(fullPage.categories)
+                : fullPage.categories
+            };
+          } catch {
+            return { ...cand, categories: fullPage.categories };
+          }
+        }
+        return cand;
+      }));
+
+      const prompt = buildSinglePagePrompt({ title: page!.title, categories: page!.categories }, enrichedCandidates);
       const response = await callGemini(prompt, 'gemini-3.1-flash-lite');
       const newLinks = response.selected_links || [];
       

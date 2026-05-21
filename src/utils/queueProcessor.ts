@@ -39,9 +39,28 @@ export async function processQueue(projectId: number) {
       }
 
       const candidateList: CandidateWithTags[] = safeJsonParse(candidateRecord.candidate_list, []);
+      const top30 = candidateList.slice(0, 30);
+
+      // غنی‌سازی پویای کاندیداها با تگ‌های متناظر جهت پایداری ۱۰۰٪ و اطمینان از ارسال تگ‌های کامل به AI
+      const enrichedCandidates = top30.map(cand => {
+        const fullPage = pages.find(p => p.id === cand.page_id);
+        if (fullPage) {
+          try {
+            return {
+              ...cand,
+              categories: typeof fullPage.categories === 'string'
+                ? JSON.parse(fullPage.categories)
+                : fullPage.categories
+            };
+          } catch {
+            return { ...cand, categories: fullPage.categories };
+          }
+        }
+        return cand;
+      });
 
       // ب: ساخت پرامپت و فراخوانی API
-      const prompt = buildSinglePagePrompt({ title: page.title, categories: page.categories }, candidateList);
+      const prompt = buildSinglePagePrompt({ title: page.title, categories: page.categories }, enrichedCandidates);
       const response = await callGemini(prompt, selectedModel);
 
       // ج: ذخیره نتیجه بلافاصله (اتومیک)

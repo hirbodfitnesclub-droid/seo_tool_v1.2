@@ -58,6 +58,12 @@ export default function Config() {
       await db.weights.where('project_id').equals(id).delete();
       await db.weights.bulkAdd(weightsToSave);
 
+      // پاک کردن کاندیداهای قبلی به جهت راه‌اندازی محاسبه خودکار مجدد سیستم با ضرایب جدید
+      await db.candidates.where('project_id').equals(id).delete();
+
+      // ریست کردن صف پردازش هوش مصنوعی در صورت وجود پردازش قبلی ناتمام
+      await db.analysisQueue.where('project_id').equals(id).delete();
+
       showToast({ type: 'success', message: 'تنظیمات پروژه با موفقیت به روزرسانی شد.' });
       navigate(`/project/${projectId}`);
     } catch (err) {

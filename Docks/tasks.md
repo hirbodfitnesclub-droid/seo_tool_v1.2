@@ -1,448 +1,289 @@
-# tasks.md — نقشه راه ارتقای الگوریتم امتیازدهی
+# tasks.md — نقشه راه مرجع (اصلاح الگوریتم لینک‌سازی)
 
-> **هدف:** پیشرفته‌سازی الگوریتم داخلی با افزودن IDF، Partial Match زمانی، Jaccard دوطرفه، و شباهت عنوان.
-> 
 > ترتیب تسک‌ها اجباری است. هر تسک روی خروجی تسک قبلی تکیه دارد.
 > قبل از شروع هر تسک، فایل‌های CONTEXT_FILES را بخوان.
 
 ---
 
-## تسک ۱ — ساخت Constants مجاورت زمانی
+## تسک ۱ — اضافه کردن ثابت‌های زمانی و فصلی
 
 ### هدف
-ایجاد یک فایل ثابت که نگاشت مجاورت ماه‌ها و فصل‌های شمسی را تعریف کند.
+اضافه کردن ثابت‌های لازم برای فیلتر زمانی/فصلی به فایل `categories.ts`.
 
 ### راهنمای پیاده‌سازی فنی
 
-1. **`src/constants/timeNeighbors.ts`** (فایل جدید) بساز با این محتوا:
+**فایل `src/constants/categories.ts`:**
+
+در انتهای فایل، این موارد را اضافه کن:
 
 ```ts
-// نگاشت ماه‌های شمسی و همسایه‌هایشان
-export const MONTH_NEIGHBORS: Record<string, string[]> = {
-  'فروردین':   ['اسفند', 'اردیبهشت'],
-  'اردیبهشت': ['فروردین', 'خرداد'],
-  'خرداد':    ['اردیبهشت', 'تیر'],
-  'تیر':      ['خرداد', 'مرداد'],
-  'مرداد':    ['تیر', 'شهریور'],
-  'شهریور':   ['مرداد', 'مهر'],
-  'مهر':      ['شهریور', 'آبان'],
-  'آبان':     ['مهر', 'آذر'],
-  'آذر':      ['آبان', 'دی'],
-  'دی':       ['آذر', 'بهمن'],
-  'بهمن':     ['دی', 'اسفند'],
-  'اسفند':    ['بهمن', 'فروردین']
+// ترتیب ماه‌های شمسی برای مقایسه زمانی
+export const PERSIAN_MONTHS_ORDER = [
+  'فروردین', 'اردیبهشت', 'خرداد',
+  'تیر', 'مرداد', 'شهریور',
+  'مهر', 'آبان', 'آذر',
+  'دی', 'بهمن', 'اسفند'
+];
+
+// نگاشت ماه به فصل
+export const MONTH_TO_SEASON: Record<string, string> = {
+  'فروردین': 'بهار',
+  'اردیبهشت': 'بهار',
+  'خرداد': 'بهار',
+  'تیر': 'تابستان',
+  'مرداد': 'تابستان',
+  'شهریور': 'تابستان',
+  'مهر': 'پاییز',
+  'آبان': 'پاییز',
+  'آذر': 'پاییز',
+  'دی': 'زمستان',
+  'بهمن': 'زمستان',
+  'اسفند': 'زمستان'
 };
 
-// نگاشت فصل‌ها و همسایه‌هایشان
-export const SEASON_NEIGHBORS: Record<string, string[]> = {
-  'بهار':     ['زمستان', 'تابستان'],
-  'تابستان': ['بهار', 'پاییز'],
-  'پاییز':    ['تابستان', 'زمستان'],
-  'زمستان':  ['پاییز', 'بهار']
-};
-
-// تابع کمکی: آیا دو ماه همسایه هستند؟
-export function isNeighborMonth(monthA: string, monthB: string): boolean {
-  const neighbors = MONTH_NEIGHBORS[monthA];
-  return neighbors ? neighbors.includes(monthB) : false;
-}
-
-// تابع کمکی: آیا دو فصل همسایه هستند؟
-export function isNeighborSeason(seasonA: string, seasonB: string): boolean {
-  const neighbors = SEASON_NEIGHBORS[seasonA];
-  return neighbors ? neighbors.includes(seasonB) : false;
-}
-
-// ضرایب امتیازدهی Partial Match
-export const PARTIAL_MATCH_COEFFICIENTS = {
-  EXACT: 1.0,          // تطابق دقیق
-  NEIGHBOR_MONTH: 0.4, // ماه مجاور
-  NEIGHBOR_SEASON: 0.5 // فصل مجاور
-};
+// بونوس‌های ثابت
+export const ORIGIN_BONUS = 10;      // بونوس مبدای یکسان
+export const DESTINATION_BONUS = 5;  // بونوس مقصد یکسان
 ```
 
-### محدودیت‌های این تسک
-- ✅ فقط constants و توابع pure — هیچ side effect ندارد
-- ✅ توابع helper باید null-safe باشند
-- ⛔ هیچ فایل دیگری تغییر نکند
-- ⛔ هیچ import از فایل‌های پروژه نباشد
-
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md"]`
-
----
-
-## تسک ۲ — ساخت ماژول Title Similarity
-
-### هدف
-ایجاد یک ماژول برای محاسبه شباهت متنی بین دو عنوان با استفاده از Jaccard روی کلمات.
-
-### راهنمای پیاده‌سازی فنی
-
-1. **`src/utils/titleSimilarity.ts`** (فایل جدید) بساز:
-
-```ts
-// کلمات بی‌معنی که از مقایسه حذف می‌شوند
-const STOP_WORDS = new Set([
-  'تور', 'به', 'از', 'در', 'با', 'و', 'یا', 'که', 'را', 'این', 'آن', 'برای'
-]);
-
-// نرمال‌سازی عنوان
-function normalizeTitle(title: string): string {
-  return title
-    // حذف اعداد فارسی و انگلیسی
-    .replace(/[۰-۹0-9]/g, '')
-    // حذف علائم نگارشی
-    .replace(/[،؛:!؟.\-_«»()]/g, ' ')
-    // حذف فاصله‌های اضافی
-    .replace(/\s+/g, ' ')
-    .trim()
-    .toLowerCase();
-}
-
-// استخراج کلمات معنادار
-function extractWords(title: string): Set<string> {
-  const normalized = normalizeTitle(title);
-  const words = normalized.split(' ').filter(w => 
-    w.length > 1 && !STOP_WORDS.has(w)
-  );
-  return new Set(words);
-}
-
-// محاسبه شباهت Jaccard بین دو عنوان
-export function titleSimilarity(titleA: string, titleB: string): number {
-  const wordsA = extractWords(titleA);
-  const wordsB = extractWords(titleB);
-  
-  // اگر یکی از دو مجموعه خالی بود
-  if (wordsA.size === 0 || wordsB.size === 0) {
-    return 0;
-  }
-  
-  // محاسبه اشتراک
-  const intersection = [...wordsA].filter(w => wordsB.has(w)).length;
-  
-  // محاسبه اجتماع
-  const union = new Set([...wordsA, ...wordsB]).size;
-  
-  // Jaccard
-  return union > 0 ? intersection / union : 0;
-}
-
-// وزن ثابت برای اضافه شدن به امتیاز نهایی
-export const TITLE_SIMILARITY_WEIGHT = 1.5;
-```
-
-**چرا این کد؟**
-- `STOP_WORDS`: کلماتی مثل «تور» که در همه عناوین هست و تفاوت‌ساز نیست
-- `normalizeTitle`: برای یکسان‌سازی قبل از مقایسه
-- `extractWords`: تبدیل عنوان به مجموعه کلمات معنادار
-- `titleSimilarity`: فرمول Jaccard خالص
-- `TITLE_SIMILARITY_WEIGHT`: برای تنظیم تأثیر در امتیاز نهایی
+همچنین وزن پیش‌فرض `شهر_یا_استان_مبدا` را به `6` تغییر بده (چون مبدا اولویت اول است).
 
 ### محدودیت‌های این تسک
-- ✅ تابع باید pure باشد (بدون side effect)
-- ✅ خروجی عددی بین ۰ و ۱ باشد
-- ⛔ از هیچ کتابخانه خارجی استفاده نشود
+- ✅ فقط اضافه کردن ثابت‌ها — هیچ منطقی تغییر نکند
+- ✅ export کن تا در فایل‌های دیگر قابل استفاده باشند
 - ⛔ هیچ فایل دیگری تغییر نکند
 
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md"]`
+`CONTEXT_FILES: ["src/constants/categories.ts"]`
 
 ---
 
-## تسک ۳ — ساخت ماژول محاسبه IDF
+## تسک ۲ — بازنویسی کامل موتور امتیازدهی با منطق چندلایه
 
 ### هدف
-ایجاد ماژولی که IDF را برای تمام مقادیر تگ در یک پروژه محاسبه کند.
-
-### چرا IDF؟
-اگر ۳۰۰ صفحه تگ «کشور: ترکیه» داشته باشند و فقط ۲ صفحه تگ «شهر: آلاچاتی» داشته باشند، تطابق روی آلاچاتی باید امتیاز بیشتری بگیرد چون نادرتر است.
+بازنویسی فایل `scorer.ts` با منطق جدید که شامل فیلتر فصلی، بونوس مبدا/مقصد، و امتیازدهی چندلایه است.
 
 ### راهنمای پیاده‌سازی فنی
 
-1. **`src/utils/idfCalculator.ts`** (فایل جدید) بساز:
+**فایل `src/utils/scorer.ts`:**
+
+کل فایل را بازنویسی کن. ساختار جدید:
 
 ```ts
-import { type Page } from '../db';
+import { PERSIAN_MONTHS_ORDER, MONTH_TO_SEASON, ORIGIN_BONUS, DESTINATION_BONUS } from '../constants/categories';
 
-// ساختار خروجی IDF: هر فیلد → هر مقدار → امتیاز IDF
-export type IDFMap = Record<string, Record<string, number>>;
-
-// محاسبه IDF برای تمام صفحات یک پروژه
-export function computeIDFMap(pages: Page[]): IDFMap {
-  const totalPages = pages.length;
-  
-  // شمارش تعداد صفحات برای هر مقدار هر فیلد
-  // ساختار: { field: { value: count } }
-  const valueCounts: Record<string, Record<string, number>> = {};
-  
-  // مرحله ۱: شمارش
-  for (const page of pages) {
-    const categories = JSON.parse(page.categories) as Record<string, string | null>;
-    
-    for (const [field, value] of Object.entries(categories)) {
-      if (value === null) continue;
-      
-      if (!valueCounts[field]) {
-        valueCounts[field] = {};
-      }
-      
-      if (!valueCounts[field][value]) {
-        valueCounts[field][value] = 0;
-      }
-      
-      valueCounts[field][value]++;
-    }
-  }
-  
-  // مرحله ۲: محاسبه IDF
-  const idfMap: IDFMap = {};
-  
-  for (const [field, values] of Object.entries(valueCounts)) {
-    idfMap[field] = {};
-    
-    for (const [value, count] of Object.entries(values)) {
-      // فرمول IDF با smoothing برای جلوگیری از صفر شدن
-      // IDF = log(totalPages / (count + 1))
-      // +1 در مخرج برای جلوگیری از division by zero
-      idfMap[field][value] = Math.log(totalPages / (count + 1));
-    }
-  }
-  
-  return idfMap;
-}
-
-// گرفتن IDF یک مقدار خاص (با fallback به ۱)
-export function getIDF(idfMap: IDFMap, field: string, value: string): number {
-  return idfMap[field]?.[value] ?? 1;
-}
-```
-
-**توضیح فرمول:**
-- `totalPages = 400`، `count = 300` (ترکیه) → IDF = log(400/301) ≈ 0.28 (کم‌ارزش)
-- `totalPages = 400`، `count = 2` (آلاچاتی) → IDF = log(400/3) ≈ 4.89 (پرارزش)
-
-### محدودیت‌های این تسک
-- ✅ تابع باید pure باشد
-- ✅ باید با JSON.parse روی categories کار کند
-- ✅ از smoothing (+1) استفاده شود
-- ⛔ IDF نباید منفی شود (Math.log روی عدد بزرگتر از ۱ همیشه مثبت است)
-- ⛔ هنوز ذخیره در دیتابیس نشود — فقط محاسبه
-
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/db.ts"]`
-
----
-
-## تسک ۴ — آپدیت دیتابیس برای کش IDF
-
-### هدف
-اضافه کردن جدول `idfCache` برای ذخیره نتایج محاسبه IDF و جلوگیری از محاسبه تکراری.
-
-### راهنمای پیاده‌سازی فنی
-
-1. **`src/db.ts`** را ویرایش کن:
-
-**اضافه کردن interface جدید (قبل از class):**
-```ts
-// جدول کش IDF
-export interface IDFCacheRecord {
-  id?: number;
-  project_id: number;
-  idf_map: string; // JSON.stringify شده از IDFMap
-  computed_at: string;
-}
-```
-
-**آپدیت class برای جدول جدید:**
-```ts
-export class LinkMeshDB extends Dexie {
-  projects!: Table<Project>;
-  pages!: Table<Page>;
-  weights!: Table<Weight>;
-  candidates!: Table<CandidateRecord>;
-  results!: Table<Result>;
-  analysisQueue!: Table<AnalysisQueue>;
-  idfCache!: Table<IDFCacheRecord>; // اضافه شد
-
-  constructor() {
-    super('LinkMeshDB');
-    // ارتقا به نسخه ۳
-    this.version(3).stores({
-      projects: '++id, name, created_at',
-      pages: '++id, project_id, title',
-      weights: '++id, project_id, category_name',
-      candidates: '++id, project_id, source_page_id',
-      results: '++id, project_id, source_page_id',
-      analysisQueue: '++id, project_id',
-      idfCache: '++id, project_id'  // اضافه شد
-    });
-  }
-}
-```
-
-**نکته مهم:** نسخه دیتابیس را از `2` به `3` تغییر بده.
-
-### محدودیت‌های این تسک
-- ✅ فقط تغییر schema — هیچ منطق جدید
-- ✅ نسخه ۳ دیتابیس
-- ⛔ کد‌های موجود نباید خراب شوند (backward compatible)
-- ⛔ هیچ کامپوننت UI تغییر نکند
-
-`CONTEXT_FILES: ["src/db.ts"]`
-
----
-
-## تسک ۵ — بازنویسی کامل scorer.ts
-
-### هدف
-بازنویسی الگوریتم امتیازدهی با افزودن تمام قابلیت‌های جدید: IDF، Partial Match، Jaccard، Title Similarity.
-
-### راهنمای پیاده‌سازی فنی
-
-**`src/utils/scorer.ts`** را کاملاً بازنویسی کن:
-
-```ts
-import { PARTIAL_MATCH_COEFFICIENTS, isNeighborMonth, isNeighborSeason } from '../constants/timeNeighbors';
-import { titleSimilarity, TITLE_SIMILARITY_WEIGHT } from './titleSimilarity';
-import { type IDFMap, getIDF } from './idfCalculator';
-
-// ساختار خروجی هر کاندیدا
+// اینترفیس جدید با فیلدهای بونوس
 export interface CandidateWithTags {
   page_id: number;
   title: string;
   score: number;
-  matchedTags: string[];
-  scoreDetails: {
-    tagScore: number;
-    jaccardScore: number;
-    titleScore: number;
-  };
+  matched_tags: string[];
+  origin_bonus: number;      // فیلد جدید
+  destination_bonus: number; // فیلد جدید
 }
 
-// نوع categories
-type CategoriesMap = Record<string, string | null>;
-
-// فیلدهایی که Partial Match دارند
-const MONTH_FIELD = 'ماه_تقویمی_برگزاری';
-const SEASON_FIELD = 'فصل_برگزاری';
-
-// محاسبه امتیاز یک جفت صفحه
-export function computeAdvancedScore(
-  sourceCat: CategoriesMap,
-  candidateCat: CategoriesMap,
-  sourceTitle: string,
-  candidateTitle: string,
-  weights: Record<string, number>,
-  idfMap: IDFMap,
-  mode: 'linear' | 'weighted'
-): { score: number; matchedTags: string[]; details: CandidateWithTags['scoreDetails'] } {
+/**
+ * تابع ۱: فیلتر Hard فصلی/زمانی
+ * 
+ * قانون: اگر صفحه منبع ماه خاصی دارد (مثلاً آبان)، کاندیدا باید:
+ *   - همان ماه باشد (آبان)
+ *   - یا ماه بعدی باشد (آذر)
+ *   - ماه‌های قبلی یا فصل‌های دیگر ❌ حذف می‌شوند
+ * 
+ * اگر صفحه منبع فصل دارد ولی ماه خاص ندارد، فقط همان فصل مجاز است.
+ * اگر صفحه منبع نه ماه دارد نه فصل (صفحه عمومی)، همه کاندیداها مجازند.
+ */
+export function isValidSeasonalMatch(sourceCategories: any, candidateCategories: any): boolean {
+  const sourceMonth = sourceCategories['ماه_تقویمی_برگزاری'];
+  const sourceSeason = sourceCategories['فصل_برگزاری'];
+  const candidateMonth = candidateCategories['ماه_تقویمی_برگزاری'];
+  const candidateSeason = candidateCategories['فصل_برگزاری'];
   
-  let tagScore = 0;
-  const matchedTags: string[] = [];
+  // صفحه منبع عمومی است — همه مجاز
+  if (!sourceMonth && !sourceSeason) {
+    return true;
+  }
   
-  // شمارش فیلدهای غیرnull برای Jaccard
-  const sourceNonNullFields: string[] = [];
-  const candidateNonNullFields: string[] = [];
-  let exactMatchCount = 0;
-  
-  // ۱. امتیاز تگ‌ها با IDF و Partial Match
-  for (const field of Object.keys(sourceCat)) {
-    const srcVal = sourceCat[field];
-    const candVal = candidateCat[field];
+  // ۱. بررسی ماه
+  if (sourceMonth) {
+    const sourceIdx = PERSIAN_MONTHS_ORDER.indexOf(sourceMonth);
     
-    // شمارش فیلدهای غیرnull
-    if (srcVal !== null) sourceNonNullFields.push(field);
-    if (candVal !== null) candidateNonNullFields.push(field);
-    
-    // اگر یکی null بود، skip
-    if (srcVal === null || candVal === null) continue;
-    
-    const baseWeight = mode === 'linear' ? 1 : (weights[field] ?? 1);
-    const idf = getIDF(idfMap, field, srcVal);
-    
-    // تطابق دقیق
-    if (srcVal === candVal) {
-      tagScore += baseWeight * idf * PARTIAL_MATCH_COEFFICIENTS.EXACT;
-      matchedTags.push(field);
-      exactMatchCount++;
+    // اگر کاندیدا ماه دارد
+    if (candidateMonth) {
+      const candidateIdx = PERSIAN_MONTHS_ORDER.indexOf(candidateMonth);
+      // ماه باید یکی باشد یا یکی بعد (با در نظر گرفتن چرخش سال)
+      const isCurrentMonth = candidateIdx === sourceIdx;
+      const isNextMonth = candidateIdx === (sourceIdx + 1) % 12;
+      
+      if (!isCurrentMonth && !isNextMonth) {
+        return false; // ماه نامعتبر — حذف
+      }
     }
-    // Partial Match برای ماه
-    else if (field === MONTH_FIELD && isNeighborMonth(srcVal, candVal)) {
-      tagScore += baseWeight * idf * PARTIAL_MATCH_COEFFICIENTS.NEIGHBOR_MONTH;
-      matchedTags.push(`${field}(مجاور)`);
+    // اگر کاندیدا ماه ندارد ولی فصل دارد، فصلش باید با ماه منبع هم‌خوان باشد
+    else if (candidateSeason) {
+      const sourceSeasonFromMonth = MONTH_TO_SEASON[sourceMonth];
+      if (candidateSeason !== sourceSeasonFromMonth) {
+        return false; // فصل نامعتبر — حذف
+      }
     }
-    // Partial Match برای فصل
-    else if (field === SEASON_FIELD && isNeighborSeason(srcVal, candVal)) {
-      tagScore += baseWeight * idf * PARTIAL_MATCH_COEFFICIENTS.NEIGHBOR_SEASON;
-      matchedTags.push(`${field}(مجاور)`);
+    // کاندیدا نه ماه دارد نه فصل — صفحه عمومی، مجاز است
+  }
+  
+  // ۲. بررسی فصل (اگر منبع فقط فصل دارد بدون ماه خاص)
+  else if (sourceSeason) {
+    if (candidateSeason && candidateSeason !== sourceSeason) {
+      return false; // فصل متفاوت — حذف
+    }
+    // اگر کاندیدا ماه دارد، بررسی کن ماهش با فصل منبع هم‌خوان باشد
+    if (candidateMonth) {
+      const candidateSeasonFromMonth = MONTH_TO_SEASON[candidateMonth];
+      if (candidateSeasonFromMonth !== sourceSeason) {
+        return false;
+      }
     }
   }
   
-  // ۲. Jaccard Bidirectional
-  const union = new Set([...sourceNonNullFields, ...candidateNonNullFields]).size;
-  const jaccardScore = union > 0 ? (exactMatchCount / union) * 10 : 0;
-  
-  // ۳. Title Similarity
-  const titleScore = titleSimilarity(sourceTitle, candidateTitle) * TITLE_SIMILARITY_WEIGHT;
-  
-  // ۴. امتیاز نهایی
-  const finalScore = tagScore + jaccardScore + titleScore;
-  
-  return {
-    score: Math.round(finalScore * 100) / 100,
-    matchedTags,
-    details: { tagScore, jaccardScore, titleScore }
-  };
+  return true; // فیلتر پاس شد
 }
 
-// پیدا کردن بهترین کاندیداها برای یک صفحه
+/**
+ * تابع ۲: محاسبه بونوس مبدا و مقصد
+ * 
+ * قانون اولویت:
+ *   ۱. مبدا یکسان = بونوس ۱۰ (اولویت اول)
+ *   ۲. مقصد یکسان = بونوس ۵ (اولویت دوم)
+ */
+export function calculateBonuses(sourceCategories: any, candidateCategories: any): { originBonus: number; destinationBonus: number } {
+  let originBonus = 0;
+  let destinationBonus = 0;
+  
+  // بونوس مبدا
+  const sourceOrigin = sourceCategories['شهر_یا_استان_مبدا'];
+  const candidateOrigin = candidateCategories['شهر_یا_استان_مبدا'];
+  if (sourceOrigin && candidateOrigin && sourceOrigin === candidateOrigin) {
+    originBonus = ORIGIN_BONUS;
+  }
+  
+  // بونوس مقصد
+  const sourceDestination = sourceCategories['شهر_یا_جزیره_مقصد'];
+  const candidateDestination = candidateCategories['شهر_یا_جزیره_مقصد'];
+  if (sourceDestination && candidateDestination && sourceDestination === candidateDestination) {
+    destinationBonus = DESTINATION_BONUS;
+  }
+  
+  return { originBonus, destinationBonus };
+}
+
+/**
+ * تابع ۳: محاسبه تگ‌های مشترک (بدون تغییر)
+ */
+export function getMatchedTags(catA: any, catB: any): string[] {
+  const matched: string[] = [];
+  Object.keys(catA).forEach((field) => {
+    if (catA[field] !== null && catB[field] !== null && catA[field] === catB[field]) {
+      matched.push(field);
+    }
+  });
+  return matched;
+}
+
+/**
+ * تابع ۴: محاسبه امتیاز پایه (وزن تگ‌های مشترک)
+ */
+export function computeBaseScore(catA: any, catB: any, weights: Record<string, number>, mode: 'linear' | 'weighted'): number {
+  let score = 0;
+  
+  for (const field in catA) {
+    if (catA[field] !== null && catB[field] !== null && catA[field] === catB[field]) {
+      if (mode === 'linear') {
+        score += 1;
+      } else {
+        score += (weights[field] ?? 1);
+      }
+    }
+  }
+  
+  return score;
+}
+
+/**
+ * تابع ۵: پیدا کردن کاندیداها با منطق چندلایه
+ * 
+ * لایه ۱: فیلتر Hard فصلی/زمانی → حذف صفحات نامعتبر
+ * لایه ۲: امتیاز پایه → وزن تگ‌های مشترک
+ * لایه ۳: بونوس‌ها → مبدا و مقصد
+ * لایه ۴: مرتب‌سازی → بر اساس امتیاز کل (جمع، نه میانگین!)
+ */
 export function findTopCandidates(
-  sourcePage: { id: number; title: string; categories: string },
-  allPages: { id: number; title: string; categories: string }[],
-  weights: Record<string, number>,
-  idfMap: IDFMap,
+  sourcePage: any, 
+  allPages: any[], 
+  weights: Record<string, number>, 
   mode: 'linear' | 'weighted'
 ): CandidateWithTags[] {
+  const sourceCat = JSON.parse(sourcePage.categories);
   
-  const sourceCat = JSON.parse(sourcePage.categories) as CategoriesMap;
+  const candidates: CandidateWithTags[] = [];
   
-  return allPages
-    // خود صفحه را حذف کن
-    .filter(p => p.id !== sourcePage.id)
-    // امتیاز هر کاندیدا را حساب کن
-    .map(p => {
-      const pCat = JSON.parse(p.categories) as CategoriesMap;
-      const { score, matchedTags, details } = computeAdvancedScore(
-        sourceCat, pCat,
-        sourcePage.title, p.title,
-        weights, idfMap, mode
-      );
-      
-      return {
-        page_id: p.id,
-        title: p.title,
-        score,
-        matchedTags,
-        scoreDetails: details
-      };
-    })
-    // فقط کسانی که امتیاز مثبت دارند
-    .filter(c => c.score > 0)
-    // مرتب‌سازی نزولی بر اساس امتیاز
-    .sort((a, b) => b.score - a.score);
+  for (const page of allPages) {
+    // اسکیپ خود صفحه
+    if (page.id === sourcePage.id) continue;
+    
+    const pageCat = JSON.parse(page.categories);
+    
+    // ────────────────────────────────────────
+    // لایه ۱: فیلتر Hard فصلی/زمانی
+    // ────────────────────────────────────────
+    if (!isValidSeasonalMatch(sourceCat, pageCat)) {
+      continue; // حذف کامل — به لیست نهایی نمی‌رود
+    }
+    
+    // ────────────────────────────────────────
+    // لایه ۲: امتیاز پایه
+    // ────────────────────────────────────────
+    const baseScore = computeBaseScore(sourceCat, pageCat, weights, mode);
+    
+    // ────────────────────────────────────────
+    // لایه ۳: بونوس مبدا/مقصد
+    // ────────────────────────────────────────
+    const { originBonus, destinationBonus } = calculateBonuses(sourceCat, pageCat);
+    
+    // ────────────────────────────────────────
+    // امتیاز نهایی = جمع (نه میانگین!)
+    // ────────────────────────────────────────
+    const totalScore = baseScore + originBonus + destinationBonus;
+    
+    // فقط صفحاتی که حداقل ۱ تطابق دارند
+    if (totalScore > 0) {
+      candidates.push({
+        page_id: page.id!,
+        title: page.title,
+        score: totalScore,
+        matched_tags: getMatchedTags(sourceCat, pageCat),
+        origin_bonus: originBonus,
+        destination_bonus: destinationBonus
+      });
+    }
+  }
+  
+  // ────────────────────────────────────────
+  // لایه ۴: مرتب‌سازی نهایی
+  // ────────────────────────────────────────
+  candidates.sort((a, b) => b.score - a.score);
+  
+  return candidates;
 }
 
-// محاسبه کاندیداها برای تمام صفحات
+/**
+ * تابع ۶: محاسبه کاندیداها برای همه صفحات (بدون تغییر در امضا)
+ */
 export function computeAllCandidates(
-  pages: { id: number; title: string; categories: string }[],
-  weights: Record<string, number>,
-  idfMap: IDFMap,
+  pages: any[], 
+  weights: Record<string, number>, 
   mode: 'linear' | 'weighted'
 ): Map<number, CandidateWithTags[]> {
-  
   const map = new Map<number, CandidateWithTags[]>();
   
   for (const page of pages) {
-    const candidates = findTopCandidates(page, pages, weights, idfMap, mode);
+    const candidates = findTopCandidates(page, pages, weights, mode);
     map.set(page.id!, candidates);
   }
   
@@ -450,183 +291,315 @@ export function computeAllCandidates(
 }
 ```
 
-### نکات مهم برای کدنویس
-1. **ترتیب import‌ها:** اول constants، بعد utils
-2. **`exactMatchCount`:** فقط برای Jaccard استفاده می‌شود (Partial Matchها شامل نمی‌شوند)
-3. **`scoreDetails`:** برای نمایش در UI مفید است
-4. **Type Safety:** تمام types باید صریح باشند
-
 ### محدودیت‌های این تسک
-- ✅ توابع قبلی باید جایگزین شوند (نه اضافه)
-- ✅ signature توابع اصلی عوض شده — مصرف‌کننده‌ها در تسک بعدی آپدیت می‌شوند
-- ⛔ هیچ فایل دیگری در این تسک تغییر نکند
-- ⛔ تست‌ها در این تسک نوشته نمی‌شوند
+- ✅ تمام توابع قبلی باید همچنان export شوند
+- ✅ فیلتر فصلی باید **قبل** از محاسبه امتیاز انجام شود
+- ✅ امتیاز نهایی = جمع (نه میانگین)
+- ⛔ هیچ import جدیدی غیر از `categories.ts` اضافه نشود
+- ⛔ تابع `computeAllCandidates` نباید امضایش تغییر کند
 
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/utils/scorer.ts", "src/constants/timeNeighbors.ts", "src/utils/titleSimilarity.ts", "src/utils/idfCalculator.ts"]`
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/utils/scorer.ts", "src/constants/categories.ts"]`
 
 ---
 
-## تسک ۶ — آپدیت candidateStorage.ts
+## تسک ۳ — پیاده‌سازی Reactivity تنظیمات در Config
 
 ### هدف
-تطبیق فایل `candidateStorage.ts` با الگوریتم جدید: محاسبه IDF، ذخیره کش، و استفاده از توابع جدید scorer.
+وقتی کاربر در صفحه Config تنظیمات را تغییر می‌دهد (مثلاً از `linear` به `weighted`)، سیستم باید جدول `candidates` را پاک کند تا در ورود بعدی به `ProjectPages` مجدداً محاسبه شود.
 
 ### راهنمای پیاده‌سازی فنی
 
-**`src/utils/candidateStorage.ts`** را ویرایش کن:
+**فایل `src/pages/Config.tsx`:**
+
+در تابع `handleStartAnalysis`، **قبل از** navigate، کاندیداهای قبلی را پاک کن:
 
 ```ts
-import { db, type Page } from '../db';
-import { computeAllCandidates } from './scorer';
-import { computeIDFMap, type IDFMap } from './idfCalculator';
+const handleStartAnalysis = async () => {
+  if (!apiKey) {
+    alert('لطفاً کلید API Gemini را وارد کنید');
+    return;
+  }
+  if (!projectId) return;
 
-// محاسبه و ذخیره کاندیداهای برتر برای تمام صفحات یک پروژه
-export async function computeAndStoreCandidates(
-  projectId: number,
-  pages: Page[],
-  weights: Record<string, number>,
-  mode: 'linear' | 'weighted'
-): Promise<void> {
-  
-  // ۱. محاسبه IDF برای کل پروژه
-  const idfMap = computeIDFMap(pages);
-  
-  // ۲. ذخیره IDF در کش
-  await db.idfCache.where('project_id').equals(projectId).delete();
-  await db.idfCache.add({
-    project_id: projectId,
-    idf_map: JSON.stringify(idfMap),
-    computed_at: new Date().toISOString()
-  });
-  
-  // ۳. حذف کاندیداهای قبلی پروژه
-  await db.candidates.where('project_id').equals(projectId).delete();
-  
-  // ۴. تبدیل pages به فرمت مورد نیاز scorer
-  const pagesWithId = pages.map(p => ({
-    id: p.id!,
-    title: p.title,
-    categories: p.categories
-  }));
-  
-  // ۵. محاسبه کاندیداها با الگوریتم پیشرفته
-  const candidatesMap = computeAllCandidates(pagesWithId, weights, idfMap, mode);
-  
-  // ۶. آماده‌سازی رکوردها
-  const now = new Date().toISOString();
-  const records = Array.from(candidatesMap.entries()).map(([pageId, list]) => ({
-    project_id: projectId,
-    source_page_id: pageId,
-    candidate_list: JSON.stringify(list),
-    computed_at: now
-  }));
-  
-  // ۷. ذخیره یکجا در دیتابیس
-  await db.candidates.bulkAdd(records);
+  setSaving(true);
+  try {
+    const id = parseInt(projectId);
+    
+    // ۱. ذخیره تنظیمات پروژه
+    await db.projects.update(id, { scoring_mode: scoringMode, max_links: maxLinks });
+
+    // ۲. ذخیره وزن‌ها
+    const weightsToSave = Object.entries(localWeights).map(([name, val]) => ({
+      project_id: id,
+      category_name: name,
+      weight_value: Number(val)
+    }));
+    await db.weights.where('project_id').equals(id).delete();
+    await db.weights.bulkAdd(weightsToSave);
+
+    // ────────────────────────────────────────
+    // ۳. [جدید] پاک کردن کاندیداها برای تریگر محاسبه مجدد
+    // ────────────────────────────────────────
+    await db.candidates.where('project_id').equals(id).delete();
+    
+    // ────────────────────────────────────────
+    // ۴. [جدید] ریست کردن صف پردازش (اگر قبلاً در حال پردازش بود)
+    // ────────────────────────────────────────
+    await db.analysisQueue.where('project_id').equals(id).delete();
+
+    navigate(`/project/${projectId}`);
+  } catch (err) {
+    console.error(err);
+    alert('خطا در ذخیره تنظیمات');
+  } finally {
+    setSaving(false);
+  }
+};
+```
+
+**نکته مهم:** با این تغییر، وقتی کاربر به `ProjectPages` می‌رود، `useEffect` موجود که `candidatesCount === 0` را چک می‌کند، خودکار محاسبه مجدد را تریگر می‌کند.
+
+### محدودیت‌های این تسک
+- ✅ کاندیداها باید **قبل از** navigate پاک شوند
+- ✅ صف پردازش هم ریست شود
+- ⛔ UI صفحه Config تغییر نکند
+
+`CONTEXT_FILES: ["src/pages/Config.tsx", "src/db.ts"]`
+
+---
+
+## تسک ۴ — بهبود پرامپت AI با درک نیت کاربر
+
+### هدف
+بازنویسی تابع `buildSinglePagePrompt` در `queueProcessor.ts` با پرامپت جدید که نیت کاربر را درک می‌کند.
+
+### راهنمای پیاده‌سازی فنی
+
+**فایل `src/utils/queueProcessor.ts`:**
+
+تابع `buildSinglePagePrompt` را کاملاً جایگزین کن:
+
+```ts
+export function buildSinglePagePrompt(
+  sourcePage: { title: string; categories: object },
+  candidates: CandidateWithTags[]
+): string {
+  return `
+تو یک متخصص SEO و معمار لینک‌سازی داخلی برای سایت تور مسافرتی «نهال‌گشت» هستی.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎯 مهم‌ترین وظیفه تو: درک نیت کاربر
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+قبل از انتخاب لینک‌ها، باید به این سوالات پاسخ دهی:
+
+۱. **چه کسی** به این صفحه می‌آید؟
+   - کاربری که دنبال تور ${sourcePage.title} است
+
+۲. **چه زمانی** می‌خواهد سفر کند؟
+   - به تگ «ماه_تقویمی_برگزاری» و «فصل_برگزاری» نگاه کن
+   - اگر صفحه مثلاً مال تیرماه است، کاربر برای تابستان برنامه دارد
+   - پس فقط صفحات همان بازه زمانی مرتبط هستند
+
+۳. **دغدغه اصلی** کاربر چیست؟
+   - آیا دنبال مقصد خاص است؟ → صفحات همان مقصد
+   - آیا از شهر خاصی می‌خواهد برود؟ → صفحات همان مبدا (اولویت بالاتر!)
+   - آیا نوع خاصی از تور می‌خواهد؟ → صفحات همان نوع
+
+۴. **سفر کاربر در سایت** چگونه تکمیل می‌شود؟
+   - صفحاتی که اطلاعات **مکمل** (نه تکراری) ارائه می‌دهند
+   - مثلاً: تور قشم → تور کیش (مقصد مشابه در همان فصل)
+   - مثلاً: تور آنتالیا تابستان → تور مارماریس تابستان (کشور و فصل مشترک)
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📋 قوانین انتخاب لینک
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+۱. **قانون زمانی (مهم!):**
+   - صفحات با فصل متفاوت را انتخاب نکن
+   - مثال: اگر صفحه منبع «تور قشم آبان» است، «تور قشم نوروز» انتخاب نشود!
+
+۲. **قانون مبدا (اولویت اول):**
+   - صفحات با مبدای یکسان بالاترین ارتباط را دارند
+   - به فیلد «origin_bonus» نگاه کن — اگر ۱۰ است یعنی مبدا یکسان است
+
+۳. **قانون مقصد (اولویت دوم):**
+   - صفحات با مقصد یکسان ارتباط بالایی دارند
+   - به فیلد «destination_bonus» نگاه کن — اگر ۵ است یعنی مقصد یکسان است
+
+۴. **قانون تکمیل‌کنندگی:**
+   - صفحاتی که «گزینه‌های جایگزین» ارائه می‌دهند، نه تکرار همان صفحه
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📄 صفحه اصلی (Source Page)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+عنوان: ${sourcePage.title}
+اطلاعات طبقه‌بندی: ${JSON.stringify(sourcePage.categories, null, 2)}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📋 کاندیداها (پیش‌فیلتر شده بر اساس زمان)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+${candidates.map((c, i) => `
+${i + 1}. [ID: ${c.page_id}] ${c.title}
+   📊 امتیاز کل: ${c.score}
+   🏠 بونوس مبدا: ${c.origin_bonus > 0 ? `✅ ${c.origin_bonus}` : '—'}
+   🎯 بونوس مقصد: ${c.destination_bonus > 0 ? `✅ ${c.destination_bonus}` : '—'}
+   🏷️ تگ‌های مشترک: ${c.matched_tags.join(' | ')}
+`).join('\n')}
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+📤 فرمت خروجی
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+خروجی را **فقط** به صورت JSON خالص برگردان (بدون markdown، بدون توضیح اضافی):
+
+{
+  "user_intent": "توضیح کوتاه: کاربر این صفحه چه می‌خواهد؟",
+  "selected_links": [
+    { 
+      "page_id": 42, 
+      "title": "عنوان صفحه", 
+      "reason": "دلیل انتخاب از نظر SEO و نیت کاربر"
+    }
+  ]
 }
 
-// خواندن IDF کش‌شده برای یک پروژه
-export async function getCachedIDF(projectId: number): Promise<IDFMap | null> {
-  const record = await db.idfCache.where('project_id').equals(projectId).first();
-  if (!record) return null;
-  return JSON.parse(record.idf_map) as IDFMap;
+نکته: تعداد لینک‌ها محدودیت ندارد. فقط صفحات **واقعاً مرتبط** را انتخاب کن.
+`;
 }
 ```
 
-### نکات مهم
-1. **ترتیب عملیات:** اول IDF، بعد کش، بعد حذف قبلی‌ها، بعد محاسبه جدید
-2. **Transaction نیست:** چون عملیات‌ها مستقل هستند
-3. **`getCachedIDF`:** برای استفاده در تحلیل تکی AI
-
 ### محدودیت‌های این تسک
-- ✅ تابع `computeAndStoreCandidates` باید همان signature را نگه دارد (برای backward compatibility)
-- ✅ IDF باید کش شود برای استفاده‌های بعدی
-- ⛔ تغییر در فایل‌های دیگر فقط در صورت خطای compile
+- ✅ پرامپت باید فارسی و واضح باشد
+- ✅ فیلدهای `origin_bonus` و `destination_bonus` را نمایش بده
+- ✅ خروجی JSON باید شامل `user_intent` باشد
+- ⛔ ساختار خروجی JSON تغییر نکند (برای backward compatibility)
 
-`CONTEXT_FILES: ["src/utils/candidateStorage.ts", "src/utils/scorer.ts", "src/utils/idfCalculator.ts", "src/db.ts"]`
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/utils/queueProcessor.ts", "src/utils/scorer.ts"]`
 
 ---
 
-## تسک ۷ — تست دستی و رفع باگ
+## تسک ۵ — آپدیت کامپوننت CandidateCard برای نمایش بونوس‌ها
 
 ### هدف
-اجرای برنامه، آپلود یک CSV کوچک، و تأیید اینکه الگوریتم جدید درست کار می‌کند.
+نمایش بونوس مبدا و مقصد در کارت‌های کاندیدا در صفحه `PageDetail`.
 
 ### راهنمای پیاده‌سازی فنی
 
-1. **برنامه را اجرا کن** (`npm run dev`)
+**فایل `src/components/CandidateCard.tsx`:**
 
-2. **یک پروژه جدید بساز** با CSV تستی (حداقل ۱۰ صفحه)
+اینترفیس props را آپدیت کن:
 
-3. **بررسی کن:**
-   - آیا IDF محاسبه و کش شده؟ (در DevTools → Application → IndexedDB → idfCache)
-   - آیا امتیازات منطقی هستند؟ (تگ‌های نادر امتیاز بیشتر)
-   - آیا Partial Match کار می‌کند؟ (ماه‌های مجاور امتیاز می‌گیرند)
-   - آیا scoreDetails در خروجی هست؟
+```ts
+interface CandidateCardProps {
+  title: string;
+  score: number;
+  matchedTags: string[];
+  originBonus?: number;      // فیلد جدید
+  destinationBonus?: number; // فیلد جدید
+  isSelected?: boolean;
+  onSelect?: () => void;
+}
+```
 
-4. **اگر خطا بود:**
-   - خطای console را بخوان
-   - فایل مربوطه را پیدا و رفع کن
-   - دوباره تست کن
-
-### خروجی مورد انتظار
-- کاندیداها با امتیازات جدید ذخیره شوند
-- صفحات با تگ‌های نادر مشترک امتیاز بالاتری بگیرند
-- ماه‌های مجاور (مثل فروردین-اردیبهشت) امتیاز جزئی بگیرند
-
-### محدودیت‌های این تسک
-- ✅ فقط تست و رفع باگ
-- ⛔ ویژگی جدید اضافه نشود
-- ⛔ اگر همه چیز کار کرد، هیچ تغییری لازم نیست
-
-`CONTEXT_FILES: ["src/utils/scorer.ts", "src/utils/candidateStorage.ts", "src/utils/idfCalculator.ts"]`
-
----
-
-## تسک ۸ — آپدیت UI برای نمایش جزئیات امتیاز
-
-### هدف
-نمایش `scoreDetails` در کامپوننت‌های UI برای شفافیت بیشتر.
-
-### راهنمای پیاده‌سازی فنی
-
-1. **`src/components/CandidateCard.tsx`** را ویرایش کن:
+در بدنه کامپوننت، بعد از نمایش امتیاز، بونوس‌ها را نشان بده:
 
 ```tsx
-// اضافه کردن نمایش breakdown امتیاز
-<div className="text-xs text-gray-500 mt-1">
-  {candidate.scoreDetails && (
-    <span>
-      تگ: {candidate.scoreDetails.tagScore.toFixed(1)} | 
-      جکارد: {candidate.scoreDetails.jaccardScore.toFixed(1)} | 
-      عنوان: {candidate.scoreDetails.titleScore.toFixed(1)}
+{/* نمایش بونوس‌ها */}
+<div className="flex gap-2 mt-2">
+  {originBonus > 0 && (
+    <span className="px-2 py-0.5 bg-green-100 text-green-700 text-[10px] rounded-full font-bold">
+      🏠 مبدا یکسان (+{originBonus})
+    </span>
+  )}
+  {destinationBonus > 0 && (
+    <span className="px-2 py-0.5 bg-blue-100 text-blue-700 text-[10px] rounded-full font-bold">
+      🎯 مقصد یکسان (+{destinationBonus})
     </span>
   )}
 </div>
 ```
 
-2. **`src/pages/PageDetail.tsx`**: مطمئن شو که `matchedTags` شامل "(مجاور)" را هم نشان می‌دهد
+**فایل `src/pages/PageDetail.tsx`:**
 
-3. **تولتیپ:** برای هر بخش امتیاز توضیح کوتاه اضافه کن (اختیاری)
+در جایی که `CandidateCard` رندر می‌شود، props جدید را پاس بده:
+
+```tsx
+<CandidateCard
+  title={candidate.title}
+  score={candidate.score}
+  matchedTags={candidate.matched_tags}
+  originBonus={candidate.origin_bonus}
+  destinationBonus={candidate.destination_bonus}
+  // ... سایر props
+/>
+```
 
 ### محدودیت‌های این تسک
-- ✅ فقط تغییرات UI
-- ✅ اطلاعات جدید باید خوانا و فارسی باشند
-- ⛔ منطق امتیازدهی تغییر نکند
+- ✅ بونوس‌ها فقط وقتی > 0 هستند نمایش داده شوند
+- ✅ از آیکون‌های ساده استفاده کن (🏠 برای مبدا، 🎯 برای مقصد)
+- ⛔ ساختار کلی کارت تغییر نکند
 
 `CONTEXT_FILES: ["src/components/CandidateCard.tsx", "src/pages/PageDetail.tsx"]`
 
 ---
 
-## خلاصه تغییرات
+## تسک ۶ — تست و اطمینان از یکپارچگی
 
-| فایل | عملیات | توضیح |
-|---|---|---|
-| `src/constants/timeNeighbors.ts` | جدید | نگاشت مجاورت ماه و فصل |
-| `src/utils/titleSimilarity.ts` | جدید | شباهت متنی عنوان |
-| `src/utils/idfCalculator.ts` | جدید | محاسبه IDF |
-| `src/db.ts` | ویرایش | اضافه کردن جدول idfCache |
-| `src/utils/scorer.ts` | بازنویسی | الگوریتم پیشرفته |
-| `src/utils/candidateStorage.ts` | ویرایش | استفاده از IDF و scorer جدید |
-| `src/components/CandidateCard.tsx` | ویرایش | نمایش جزئیات امتیاز |
-| `src/pages/PageDetail.tsx` | ویرایش | نمایش تگ‌های مجاور |
+### هدف
+تست کامل سیستم برای اطمینان از اینکه تمام تغییرات به درستی کار می‌کنند.
+
+### راهنمای پیاده‌سازی فنی
+
+یک فایل تست ساده بساز: `src/utils/scorer.test.ts`
+
+```ts
+import { isValidSeasonalMatch, calculateBonuses, findTopCandidates } from './scorer';
+
+// تست ۱: فیلتر فصلی
+console.log('--- تست فیلتر فصلی ---');
+
+const sourceAban = { 'ماه_تقویمی_برگزاری': 'آبان', 'فصل_برگزاری': 'پاییز' };
+const candidateAban = { 'ماه_تقویمی_برگزاری': 'آبان', 'فصل_برگزاری': 'پاییز' };
+const candidateAzar = { 'ماه_تقویمی_برگزاری': 'آذر', 'فصل_برگزاری': 'پاییز' };
+const candidateTir = { 'ماه_تقویمی_برگزاری': 'تیر', 'فصل_برگزاری': 'تابستان' };
+const candidateNorooz = { 'ماه_تقویمی_برگزاری': 'فروردین', 'فصل_برگزاری': 'بهار' };
+
+console.log('آبان → آبان:', isValidSeasonalMatch(sourceAban, candidateAban)); // true
+console.log('آبان → آذر:', isValidSeasonalMatch(sourceAban, candidateAzar));  // true (ماه بعد)
+console.log('آبان → تیر:', isValidSeasonalMatch(sourceAban, candidateTir));   // false
+console.log('آبان → نوروز:', isValidSeasonalMatch(sourceAban, candidateNorooz)); // false
+
+// تست ۲: بونوس مبدا/مقصد
+console.log('\n--- تست بونوس‌ها ---');
+
+const sourceWithOrigin = { 'شهر_یا_استان_مبدا': 'تهران', 'شهر_یا_جزیره_مقصد': 'کیش' };
+const candidateSameOrigin = { 'شهر_یا_استان_مبدا': 'تهران', 'شهر_یا_جزیره_مقصد': 'قشم' };
+const candidateSameDest = { 'شهر_یا_استان_مبدا': 'مشهد', 'شهر_یا_جزیره_مقصد': 'کیش' };
+
+console.log('مبدا یکسان:', calculateBonuses(sourceWithOrigin, candidateSameOrigin)); // { originBonus: 10, destinationBonus: 0 }
+console.log('مقصد یکسان:', calculateBonuses(sourceWithOrigin, candidateSameDest));   // { originBonus: 0, destinationBonus: 5 }
+
+console.log('\n✅ تست‌ها تمام شد');
+```
+
+**اجرا:**
+```bash
+npx ts-node src/utils/scorer.test.ts
+```
+
+### محدودیت‌های این تسک
+- ✅ فقط تست — هیچ کد production تغییر نکند
+- ✅ تست‌ها باید pass شوند
+
+`CONTEXT_FILES: ["src/utils/scorer.ts", "src/constants/categories.ts"]`
+
+---
+
+## چک‌لیست نهایی
+
+- [ ] ثابت‌های زمانی به `categories.ts` اضافه شد
+- [ ] موتور امتیازدهی با منطق چندلایه بازنویسی شد
+- [ ] تغییر تنظیمات در Config باعث پاک شدن کاندیداها می‌شود
+- [ ] پرامپت AI با درک نیت کاربر بهبود یافت
+- [ ] بونوس مبدا/مقصد در UI نمایش داده می‌شود
+- [ ] تست‌ها pass می‌شوند

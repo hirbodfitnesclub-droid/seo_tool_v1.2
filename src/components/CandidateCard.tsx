@@ -9,6 +9,8 @@ interface CandidateCardProps {
     title: string;
     score: number;
     matched_tags: string[];
+    origin_bonus?: number;      // فیلد جدید بونوس مبدا
+    destination_bonus?: number; // فیلد جدید بونوس مقصد
     rank?: number;
     scoreDetails?: {
       tagScore: number;
@@ -78,6 +80,24 @@ export const CandidateCard: React.FC<CandidateCardProps> = ({ candidate, isSelec
               <span className="text-[9px] text-gray-400 font-medium pt-0.5">+{candidate.matched_tags.length - 2} تگ مشترک</span>
             )}
           </div>
+
+          {/* نمایش اطلاعات بونوس مبدا یا مقصد در صورتی که تطابق وجود داشته باشد */}
+          {((candidate.origin_bonus && candidate.origin_bonus > 0) || (candidate.destination_bonus && candidate.destination_bonus > 0)) && (
+            <div className="flex flex-wrap gap-1.5 mt-2">
+              {candidate.origin_bonus && candidate.origin_bonus > 0 && (
+                <span className="px-2 py-0.5 bg-green-50 text-green-700 text-[10px] rounded-lg font-bold border border-green-100 flex items-center gap-1">
+                  <span>🏠</span>
+                  <span>مبدا یکسان (+{candidate.origin_bonus})</span>
+                </span>
+              )}
+              {candidate.destination_bonus && candidate.destination_bonus > 0 && (
+                <span className="px-2 py-0.5 bg-blue-50/70 text-blue-750 text-[10px] rounded-lg font-bold border border-blue-100/50 flex items-center gap-1">
+                  <span>🎯</span>
+                  <span>مقصد یکسان (+{candidate.destination_bonus})</span>
+                </span>
+              )}
+            </div>
+          )}
 
           {candidate.scoreDetails && (
             <div className="text-[9px] text-gray-400 bg-gray-50/50 p-1.5 rounded-lg border border-gray-100/55 mt-2 flex items-center justify-between font-mono">

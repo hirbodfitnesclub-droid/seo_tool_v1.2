@@ -6,293 +6,308 @@
 
 ```ts
 // src/db.ts
-db.version(3).stores({
+db.version(2).stores({
   projects : '++id, name, created_at',
   pages    : '++id, project_id, title',
   weights  : '++id, project_id, category_name',
   candidates: '++id, project_id, source_page_id',
   results  : '++id, project_id, source_page_id',
-  analysisQueue: '++id, project_id',
-  idfCache: '++id, project_id' // جدید: کش IDF برای هر پروژه
+  analysisQueue: '++id, project_id'
 })
 ```
 
-### جداول موجود (بدون تغییر ساختار)
-- `projects` — پروژه‌ها
-- `pages` — صفحات هر پروژه  
-- `weights` — وزن تگ‌ها (پایه، قبل از IDF)
-- `candidates` — لیست ۲۰ کاندیدای هر صفحه
-- `results` — نتایج نهایی AI
-- `analysisQueue` — صف پردازش AI
+### جدول `projects`
+| فیلد | نوع | توضیح |
+|---|---|---|
+| id | auto int PK | |
+| name | string | نام پروژه — مثلاً «نهال‌گشت ۱۴۰۵» |
+| created_at | ISO string | تاریخ ساخت |
+| scoring_mode | `'linear'` یا `'weighted'` | روش امتیازدهی |
 
-### جدول جدید `idfCache`
+### جدول `pages`
 | فیلد | نوع | توضیح |
 |---|---|---|
 | id | auto int PK | |
 | project_id | int FK → projects.id | |
-| idf_map | JSON string | `{ "tag_field": { "tag_value": idf_score } }` |
-| computed_at | ISO string | زمان محاسبه |
+| title | string | مقدار ستون `عنوان_H1` از CSV |
+| categories | JSON string | آبجکت حاوی ۱۸ فیلد دسته‌بندی |
 
-**ساختار `idf_map`:**
+**ساختار `categories` (JSON.stringify شده):**
 ```json
 {
-  "کشور_مقصد": {
-    "ترکیه": 0.52,
-    "امارات": 2.1,
-    "آلمان": 3.8
-  },
-  "شهر_یا_جزیره_مقصد": {
-    "آنتالیا": 1.2,
-    "آلاچاتی": 4.3
+  "قاره_یا_منطقه": "اوراسیا",
+  "کشور_مقصد": "ترکیه",
+  "جهت_در_منطقه": "مدیترانه",
+  "شهر_یا_جزیره_مقصد": "کوش آداسی",
+  "شهر_یا_استان_مبدا": null,
+  "نوع_تور": "تک مقصد",
+  "فصل_برگزاری": "تابستان",
+  "ماه_تقویمی_برگزاری": "تیر",
+  "تعطیلات_خاص_تقویمی": null,
+  "رویداد_یا_مناسبت_خاص": null,
+  "تم_یا_هدف_سفر": null,
+  "نوع_وسیله_نقلیه": "هوایی",
+  "نام_دقیق_هتل": null,
+  "تعداد_ستاره_هتل": null,
+  "برچسب_کلاسی_تور": null,
+  "پرسونای_مخاطب": null,
+  "وضعیت_ویزا": "بدون ویزا",
+  "نوع_سفر": "تفریحی، استراحت و ریلکسیشن"
+}
+```
+
+### جدول `weights`
+| فیلد | نوع | توضیح |
+|---|---|---|
+| id | auto int PK | |
+| project_id | int FK → projects.id | |
+| category_name | string | نام ستون دسته‌بندی |
+| weight_value | float (1-5) | وزن اختصاص‌داده‌شده |
+
+**وزن‌های پیش‌فرض (بازنگری شده):**
+```ts
+{
+  'شهر_یا_استان_مبدا'   : 6, // ⬆️ افزایش — مبدا اولویت اول
+  'شهر_یا_جزیره_مقصد'   : 5, // مقصد اولویت دوم
+  'کشور_مقصد'           : 4,
+  'ماه_تقویمی_برگزاری'  : 4, // ⬆️ افزایش — زمان مهم است
+  'فصل_برگزاری'         : 4, // ⬆️ افزایش — فصل مهم است
+  'نوع_تور'             : 3,
+  'قاره_یا_منطقه'       : 2,
+  'جهت_در_منطقه'        : 2,
+  'تم_یا_هدف_سفر'       : 2,
+  'نوع_سفر'             : 2,
+  'تعطیلات_خاص_تقویمی'  : 1,
+  'رویداد_یا_مناسبت_خاص': 1,
+  'نوع_وسیله_نقلیه'     : 1,
+  'نام_دقیق_هتل'        : 1,
+  'تعداد_ستاره_هتل'     : 1,
+  'برچسب_کلاسی_تور'     : 1,
+  'پرسونای_مخاطب'       : 1,
+  'وضعیت_ویزا'          : 1,
+}
+```
+
+### جدول `candidates` (لیست کاندیدای هر صفحه)
+| فیلد | نوع | توضیح |
+|---|---|---|
+| id | auto int PK | |
+| project_id | int FK → projects.id | |
+| source_page_id | int FK → pages.id | صفحه‌ای که کاندیداها برایش محاسبه شده |
+| candidate_list | JSON string | آرایه کاندیداها (بعد از فیلتر زمانی) |
+| computed_at | ISO string | زمان محاسبه |
+
+**ساختار `candidate_list`:**
+```json
+[
+  { 
+    "page_id": 42, 
+    "title": "تور مارماریس تابستان", 
+    "score": 15, 
+    "matched_tags": ["کشور_مقصد", "فصل_برگزاری"],
+    "origin_bonus": 5,
+    "destination_bonus": 0
   }
-}
+]
 ```
+
+### جدول `results` (نتایج نهایی AI)
+| فیلد | نوع | توضیح |
+|---|---|---|
+| id | auto int PK | |
+| project_id | int FK → projects.id | |
+| source_page_id | int FK → pages.id | صفحه‌ای که لینک‌ها برایش پیشنهاد شده |
+| recommended_links | JSON string | آرایه لینک‌های پیشنهادی از AI |
+| is_manual_edit | boolean | آیا کاربر دستی ویرایش کرده؟ |
+| generated_at | ISO string | زمان تولید |
+
+### جدول `analysisQueue` (صف پردازش AI)
+| فیلد | نوع | توضیح |
+|---|---|---|
+| id | auto int PK | |
+| project_id | int FK → projects.id | |
+| status | `'pending'` / `'processing'` / `'completed'` / `'failed'` / `'paused'` | وضعیت صف |
+| current_page_index | int | ایندکس آخرین صفحه پردازش‌شده |
+| total_pages | int | تعداد کل صفحات |
+| error_message | string / null | پیام خطا اگر fail شد |
+| selected_model | string | مدل AI انتخاب شده |
+| started_at | ISO string | زمان شروع |
+| updated_at | ISO string | آخرین به‌روزرسانی |
 
 ---
 
-## الگوریتم امتیازدهی پیشرفته (Advanced Scoring)
-
-### ۱. IDF (Inverse Document Frequency)
-
-**مفهوم:** تگ‌هایی که در صفحات کمتری وجود دارند، ارزش بیشتری برای شناسایی شباهت دارند.
-
-**فرمول:**
-```
-IDF(field, value) = log( totalPages / (pagesWithThisValue + 1) )
-```
-
-**پیاده‌سازی:**
-1. هنگام `computeAndStoreCandidates`، ابتدا IDF را برای تمام مقادیر تگ محاسبه کن
-2. IDF را در جدول `idfCache` ذخیره کن
-3. در `computeScore`، به جای `weight[tag] * 1` از `weight[tag] * IDF(tag, value)` استفاده کن
-
-**مثال:**
-```
-کشور: ترکیه در ۳۰۰ صفحه از ۴۰۰ → IDF = log(400/301) ≈ 0.28
-شهر: کاپادوکیا در ۴ صفحه از ۴۰۰ → IDF = log(400/5) ≈ 4.38
-
-امتیاز قبلی: weight(کشور)=4, weight(شهر)=5 → 4*1 + 5*1 = 9
-امتیاز جدید: 4*0.28 + 5*4.38 = 1.12 + 21.9 = 23.02
-```
-
----
-
-### ۲. Partial Match برای تگ‌های زمانی
-
-**مفهوم:** ماه‌ها و فصل‌های مجاور باید امتیاز جزئی بگیرند (نه صفر).
-
-**نگاشت مجاورت ماه‌ها:**
-```ts
-const MONTH_NEIGHBORS: Record<string, string[]> = {
-  'فروردین':   ['اسفند', 'اردیبهشت'],
-  'اردیبهشت': ['فروردین', 'خرداد'],
-  'خرداد':    ['اردیبهشت', 'تیر'],
-  'تیر':      ['خرداد', 'مرداد'],
-  'مرداد':    ['تیر', 'شهریور'],
-  'شهریور':   ['مرداد', 'مهر'],
-  'مهر':      ['شهریور', 'آبان'],
-  'آبان':     ['مهر', 'آذر'],
-  'آذر':      ['آبان', 'دی'],
-  'دی':       ['آذر', 'بهمن'],
-  'بهمن':     ['دی', 'اسفند'],
-  'اسفند':    ['بهمن', 'فروردین']
-};
-```
-
-**نگاشت مجاورت فصل‌ها:**
-```ts
-const SEASON_NEIGHBORS: Record<string, string[]> = {
-  'بهار':     ['زمستان', 'تابستان'],
-  'تابستان': ['بهار', 'پاییز'],
-  'پاییز':    ['تابستان', 'زمستان'],
-  'زمستان':  ['پاییز', 'بهار']
-};
-```
-
-**امتیازدهی:**
-| نوع تطابق | ضریب امتیاز |
-|---|---|
-| تطابق دقیق | `1.0` |
-| ماه مجاور | `0.4` |
-| فصل مجاور | `0.5` |
-| بدون تطابق | `0.0` |
-
-**فیلدهای زمانی:**
-- `ماه_تقویمی_برگزاری` → از `MONTH_NEIGHBORS`
-- `فصل_برگزاری` → از `SEASON_NEIGHBORS`
-
----
-
-### ۳. Jaccard Bidirectional
-
-**مفهوم:** تطابق باید از دید هر دو صفحه سنجیده شود، نه فقط صفحه منبع.
-
-**مشکل قبلی:**
-```
-صفحه A: 5 تگ غیرnull
-صفحه B: 15 تگ غیرnull
-تطابق: 5 تگ
-
-امتیاز قدیمی: 5/5 = 100% (از دید A)
-اما از دید B: 5/15 = 33% (B خیلی جامع‌تر است)
-```
-
-**فرمول Jaccard:**
-```
-Jaccard = |intersection| / |union|
-```
-
-**یا میانگین دو دیدگاه:**
-```
-score = (matched/sourceTags + matched/candidateTags) / 2
-```
-
-**انتخاب:** از **Jaccard اصلی** استفاده می‌کنیم چون عادلانه‌تر است:
-```ts
-const intersection = matchedFields.length;
-const union = nonNullSourceFields.length + nonNullCandidateFields.length - intersection;
-const jaccardScore = intersection / union;
-```
-
-**ضریب نهایی:** `jaccardScore * 10` (برای مقیاس‌پذیری با امتیازات دیگر)
-
----
-
-### ۴. Title Text Similarity
-
-**مفهوم:** شباهت کلمات عنوان، سیگنال اضافی مفیدی است.
-
-**فرمول (Jaccard روی کلمات):**
-```ts
-function titleSimilarity(titleA: string, titleB: string): number {
-  const wordsA = new Set(normalizeTitle(titleA).split(/\s+/).filter(w => w.length > 1));
-  const wordsB = new Set(normalizeTitle(titleB).split(/\s+/).filter(w => w.length > 1));
-  
-  const intersection = [...wordsA].filter(w => wordsB.has(w)).length;
-  const union = new Set([...wordsA, ...wordsB]).size;
-  
-  if (union === 0) return 0;
-  return intersection / union; // 0 تا 1
-}
-
-function normalizeTitle(title: string): string {
-  // حذف اعداد، علائم، و کلمات بی‌معنی
-  return title
-    .replace(/[۰-۹0-9]/g, '')
-    .replace(/[،؛:!؟.\-_]/g, ' ')
-    .trim();
-}
-```
-
-**وزن:** `titleSimilarity * 1.5` (اضافه به امتیاز نهایی)
-
----
-
-## فرمول امتیاز نهایی
-
-```ts
-function computeAdvancedScore(
-  sourceCategories: CategoriesMap,
-  candidateCategories: CategoriesMap,
-  sourceTitle: string,
-  candidateTitle: string,
-  weights: Record<string, number>,
-  idfMap: IDFMap,
-  mode: 'linear' | 'weighted'
-): { score: number; matchedTags: string[]; details: ScoreDetails } {
-  
-  let tagScore = 0;
-  const matchedTags: string[] = [];
-  
-  // ۱. امتیاز تگ‌ها با IDF و Partial Match
-  for (const field in sourceCategories) {
-    const srcVal = sourceCategories[field];
-    const candVal = candidateCategories[field];
-    
-    if (srcVal === null || candVal === null) continue;
-    
-    const baseWeight = mode === 'linear' ? 1 : (weights[field] ?? 1);
-    const idfScore = idfMap[field]?.[srcVal] ?? 1;
-    
-    // تطابق دقیق
-    if (srcVal === candVal) {
-      tagScore += baseWeight * idfScore;
-      matchedTags.push(field);
-    }
-    // Partial Match برای زمان
-    else if (field === 'ماه_تقویمی_برگزاری' && isNeighborMonth(srcVal, candVal)) {
-      tagScore += baseWeight * idfScore * 0.4;
-      matchedTags.push(`${field}(مجاور)`);
-    }
-    else if (field === 'فصل_برگزاری' && isNeighborSeason(srcVal, candVal)) {
-      tagScore += baseWeight * idfScore * 0.5;
-      matchedTags.push(`${field}(مجاور)`);
-    }
-  }
-  
-  // ۲. Jaccard Bidirectional
-  const sourceNonNull = Object.values(sourceCategories).filter(v => v !== null).length;
-  const candNonNull = Object.values(candidateCategories).filter(v => v !== null).length;
-  const exactMatches = matchedTags.filter(t => !t.includes('مجاور')).length;
-  
-  const union = sourceNonNull + candNonNull - exactMatches;
-  const jaccardScore = union > 0 ? (exactMatches / union) * 10 : 0;
-  
-  // ۳. Title Similarity
-  const titleScore = titleSimilarity(sourceTitle, candidateTitle) * 1.5;
-  
-  // ۴. امتیاز نهایی
-  const finalScore = tagScore + jaccardScore + titleScore;
-  
-  return {
-    score: Math.round(finalScore * 100) / 100,
-    matchedTags,
-    details: { tagScore, jaccardScore, titleScore }
-  };
-}
-```
-
----
-
-## جریان داده جدید
+## جریان داده (Data Flow)
 
 ```
+                          ┌─────────────────────────────────────────────────────────────┐
+                          │                    User Flow                                 │
+                          └─────────────────────────────────────────────────────────────┘
+
 CSV آپلود
     │
     ▼
-Dexie: pages.bulkAdd()
+Papa Parse → آرایه ردیف‌ها
     │
     ▼
-Config Screen: weights تعیین شود
+Dexie: projects.add() + pages.bulkAdd()
     │
     ▼
-┌─────────────────────────────────────────────────┐
-│        محاسبه IDF (یکبار برای کل پروژه)        │
-│  برای هر فیلد تگ:                               │
-│    برای هر مقدار منحصر:                         │
-│      IDF = log(totalPages / countPages + 1)     │
-│  ذخیره در idfCache                              │
-└─────────────────────────────────────────────────┘
+Config Screen: scoring_mode + weights → Dexie: weights.bulkAdd()
+    │                                                
+    │  ⚠️ نکته مهم: هر تغییر در Config باید:
+    │  1. جدول candidates را پاک کند
+    │  2. محاسبه مجدد امتیازدهی را تریگر کند
     │
     ▼
-┌─────────────────────────────────────────────────┐
-│      محاسبه امتیاز پیشرفته برای هر جفت صفحه    │
-│  1. IDF-weighted tag matching                   │
-│  2. Partial match برای ماه/فصل                  │
-│  3. Jaccard bidirectional                       │
-│  4. Title similarity                            │
-└─────────────────────────────────────────────────┘
+[مرحله اول: امتیازدهی داخلی - بدون AI]
+    │
+    ▼
+scorer.ts → computeAllCandidates()
+    │
+    ├── فیلتر فصلی/زمانی (حذف صفحات نامرتبط زمانی)
+    ├── محاسبه امتیاز پایه (وزن تگ‌های مشترک)
+    ├── بونوس مبدا (origin_bonus)
+    └── بونوس مقصد (destination_bonus)
     │
     ▼
 Dexie: candidates.bulkAdd()
     │
-    ▼
-[ادامه فلو همانند قبل]
+    └───────────────────────────────────────────────────────────────────┐
+                                                                        │
+                          ┌─────────────────────────────────────────────▼
+                          │              مرحله دوم: پردازش AI                          │
+                          └─────────────────────────────────────────────────────────────┘
+
+                    ┌───────────────────┐         ┌───────────────────┐
+                    │   دکمه تکی        │         │   دکمه کلی        │
+                    │   (یک صفحه)       │         │   (همه صفحات)     │
+                    └────────┬──────────┘         └────────┬──────────┘
+                             │                             │
+                             ▼                             ▼
+                    فقط همان صفحه +               ایجاد analysisQueue
+                    کاندیداهایش                   با status='pending'
+                             │                             │
+                             ▼                             ▼
+                    gemini.ts:                       صف‌پردازی:
+                    buildSinglePagePrompt()     ┌──────────────────────────┐
+                    (با پرامپت جدید که          │  برای هر صفحه:          │
+                    نیت کاربر را درک کند)       │  1. صفحه i را بگیر       │
+                             │                   │  2. کاندیداها بفرست     │
+                             ▼                   │  3. جواب بگیر            │
+                    callGemini()                │  4. ذخیره در results     │
+                             │                   │  5. مکث ۲ ثانیه          │
+                             ▼                   │  6. update queue index   │
+                    ذخیره در results            │  7. تکرار تا آخر         │
+                                                 └──────────────────────────┘
 ```
 
 ---
 
-## مسیرهای روتینگ (بدون تغییر)
+## منطق الگوریتم امتیازدهی (`scorer.ts`) — منطق ارتباط نرم زمانی/فصلی چرخشی
+
+### ۱. ترتیب ماه‌های شمسی (برای فیلتر زمانی)
+```ts
+const PERSIAN_MONTHS_ORDER = [
+  'فروردین', 'اردیبهشت', 'خرداد',
+  'تیر', 'مرداد', 'شهریور',
+  'مهر', 'آبان', 'آذر',
+  'دی', 'بهمن', 'اسفند'
+];
+```
+
+### ۲. تابع `isValidSeasonalMatch` (منطق نرم زمانی/فصلی جدید)
+```ts
+// بررسی می‌کند آیا کاندیدا از نظر زمانی مجاز است یا خیر
+// در منطق سئویی مدرن، صفحات کلاً حذف فیزیکی نمی‌شوند، بلکه اولویت و رتبه آنها کاهش و افزایش می‌یابد.
+// بنابراین برای تطبیق سیستمی این تابع همواره true برمی‌گرداند تا در فازهای بعدی رتبه‌دهی مقتضی اعمال شود.
+function isValidSeasonalMatch(sourceCategories: any, candidateCategories: any): boolean {
+  return true;
+}
+```
+
+### ۳. تابع `calculateBonuses` (بونوس مبدا/مقصد و سیلو فصلی دوجانبه)
+```ts
+function calculateBonuses(sourceCategories: any, candidateCategories: any): { originBonus: number, destinationBonus: number } {
+  let originBonus = 0;
+  let destinationBonus = 0;
+  
+  // بونوس مبدا — اولویت اول دپارتمانی
+  if (sourceCategories['شهر_یا_استان_مبدا'] && 
+      sourceCategories['شهر_یا_استان_مبدا'] === candidateCategories['شهر_یا_استان_مبدا']) {
+    originBonus = 10;
+  }
+  
+  // بونوس مقصد — اولویت دوم دپارتمانی
+  if (sourceCategories['شهر_یا_جزیره_مقصد'] && 
+      sourceCategories['شهر_یا_جزیره_مقصد'] === candidateCategories['شهر_یا_جزیره_مقصد']) {
+    destinationBonus = 5;
+  }
+
+  // بونوس‌های زمانی و ساختار سیلویی فصلی:
+  // ۱. انتقال به ماه بعد (مثلاً قشم تیر به مرداد) دارای اولویت و امتیاز ویژه است.
+  // ۲. انتقال از ماهانه خاص به فصلی عمومی همان جزیره/مقصد (قشم تیر به قشم تابستان): بونوس خوشه/سیلو +6
+  // ۳. انتقال از فصلی عمومی به ماهانه خاص همان فصل برای تشویق هدایت کاربر (قشم تابستان به قشم تیر): بونوس خوشه/سیلو +4
+  
+  return { originBonus, destinationBonus };
+}
+```
+
+### ۴. تغییر در `findTopCandidates` — منطق رتبه‌بندی مدرن چند لایه
+```ts
+export function findTopCandidates(sourcePage: any, allPages: any[], weights: Record<string, number>, mode: 'linear' | 'weighted'): CandidateWithTags[] {
+  // امتیاز پایه با کمک ترتیب ماه‌های شمسی و تابع آماری کاهش تدریجی رتبه (Decay) محاسبه می‌شود:
+  // - ماه جاری: ۱۰۰٪ امتیاز وزن زمانی
+  // - ماه بعد: ۸۰٪ امتیاز وزن زمانی
+  // - دو ماه بعد: ۴۰٪ امتیاز وزن زمانی
+  // - ۳ الی ۵ ماه آینده: ۱۰٪ امتیاز وزن زمانی
+  // - ماه‌های گذشته: ۰ امتیاز
+}
+```
+
+---
+
+## ساختار پرامپت بهبودیافته برای Gemini
+
+```
+SYSTEM:
+تو یک متخصص SEO و معمار لینک‌سازی داخلی برای سایت تور مسافرتی هستی.
+
+مهم‌ترین وظیفه تو: **درک نیت کاربر** از بازدید صفحه منبع.
+
+قبل از انتخاب لینک‌ها، باید به این سوالات پاسخ دهی:
+1. عنوان صفحه چیست و کاربر چرا به این صفحه آمده؟
+2. بازه سفر کاربر چه زمانی است؟ (اگر صفحه مربوط به تیرماه است، کاربر احتمالاً برای تابستان برنامه دارد)
+3. دغدغه کاربر چیست؟ (قیمت؟ مقصد؟ زمان؟ نوع تور؟)
+4. کدام صفحات می‌توانند سفر کاربر در سایت را تکمیل کنند؟
+
+قوانین انتخاب لینک:
+1. **قانون زمانی:** اگر صفحه منبع ماه خاصی دارد، فقط صفحات همان ماه یا ماه بعدی مجاز هستند. صفحات فصل‌های دیگر را انتخاب نکن.
+2. **قانون مبدا:** صفحات با مبدای یکسان اولویت اول هستند.
+3. **قانون مقصد:** صفحات با مقصد یکسان اولویت دوم هستند.
+4. **قانون تکمیل‌کنندگی:** صفحاتی که اطلاعات مکمل (نه تکراری) ارائه می‌دهند.
+
+USER:
+صفحه اصلی:
+- عنوان: ${sourcePage.title}
+- ویژگی‌ها: ${JSON.stringify(sourcePage.categories)}
+
+کاندیداها (پیش‌فیلتر شده بر اساس زمان و مرتب بر اساس امتیاز):
+${candidates.map((c, i) => `${i + 1}. [ID: ${c.page_id}] ${c.title}
+   امتیاز: ${c.score} | بونوس مبدا: ${c.origin_bonus} | بونوس مقصد: ${c.destination_bonus}
+   تگ‌های مشترک: ${c.matched_tags.join(', ')}`).join('\n\n')}
+
+خروجی را فقط به صورت JSON خالص بده:
+{
+  "user_intent": "توضیح کوتاه نیت کاربر",
+  "selected_links": [
+    { "page_id": 42, "title": "...", "reason": "..." }
+  ]
+}
+```
+
+---
+
+## مسیرهای روتینگ
 
 | مسیر | کامپوننت | توضیح |
 |---|---|---|
@@ -305,25 +320,7 @@ Dexie: candidates.bulkAdd()
 
 ---
 
-## فایل‌های تغییر یافته
-
-```
-src/
-├── db.ts                         ← [ویرایش] اضافه کردن جدول idfCache + نسخه ۳
-│
-├── constants/
-│   └── timeNeighbors.ts          ← [جدید] نگاشت مجاورت ماه‌ها و فصل‌ها
-│
-├── utils/
-│   ├── scorer.ts                 ← [ویرایش کامل] الگوریتم پیشرفته امتیازدهی
-│   ├── idfCalculator.ts          ← [جدید] محاسبه و کش IDF
-│   ├── titleSimilarity.ts        ← [جدید] شباهت متنی عنوان
-│   └── candidateStorage.ts       ← [ویرایش] استفاده از الگوریتم جدید
-```
-
----
-
-## نکات امنیتی (بدون تغییر)
+## نکات امنیتی
 
 - کلید Gemini API **فقط** در `localStorage` با کلید `LINKMESH_API_KEY` ذخیره می‌شود
 - هیچ‌گاه API Key به Dexie یا state برنامه نوشته نمی‌شود
