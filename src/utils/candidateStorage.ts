@@ -6,8 +6,8 @@ import { computeIDFMap, type IDFMap } from './idfCalculator';
 export async function computeAndStoreCandidates(
   projectId: number,
   pages: Page[],
-  weights: Record<string, number>,
-  mode: 'linear' | 'weighted'
+  _weights: Record<string, number>,
+  _mode: 'linear' | 'weighted'
 ): Promise<void> {
   
   // ۱. محاسبه IDF برای کل پروژه
@@ -31,8 +31,8 @@ export async function computeAndStoreCandidates(
     categories: p.categories
   }));
   
-  // ۵. محاسبه کاندیداها با الگوریتم پیشرفته
-  const candidatesMap = computeAllCandidates(pagesWithId, weights, idfMap, mode);
+  // ۵. محاسبه کاندیداها با الگوریتم پیشرفته (بدون نیاز به weights و idfMap)
+  const candidatesMap = computeAllCandidates(pagesWithId);
   
   // ۶. آماده‌سازی رکوردها
   const now = new Date().toISOString();
