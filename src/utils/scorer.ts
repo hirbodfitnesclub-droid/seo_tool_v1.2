@@ -20,9 +20,8 @@ interface ScoreResult {
   matchedTags: string[];
   originBonus: number;
   destinationBonus: number;
-  isFiltered: boolean;
-  isCityMother: boolean;    // صفحه مادر شهر (رتبه ۱)
-  isCountryMother: boolean; // صفحه مادر کشور (رتبه ۲)
+  isCityMother: boolean;
+  isCountryMother: boolean;
 }
 
 interface PageInfo {
@@ -50,6 +49,7 @@ interface ParsedPage {
   hasMonth: boolean;
   hasSeason: boolean;
   hasHotel: boolean;
+  hasTime: boolean; // ماه یا فصل دارد
   generalKeywords: string[];
   isGeneral: boolean;
 }
@@ -64,33 +64,27 @@ const TRANSPORT_KEYWORDS = ['هوایی', 'قطار', 'اتوبوس', 'کشتی'
 
 /**
  * محاسبه ماه شمسی فعلی بر اساس تاریخ میلادی
- * این تابع تقریبی است و برای اکثر موارد کافی است
  */
 function getCurrentPersianMonthIndex(): number {
   const now = new Date();
-  const month = now.getMonth(); // 0-11
+  const month = now.getMonth();
   const day = now.getDate();
 
-  // تبدیل تقریبی میلادی به شمسی
-  // فروردین: ~21 مارس تا ~20 آوریل
-  // اردیبهشت: ~21 آوریل تا ~21 می
-  // ...
   const persianMonthMap: Array<{ start: [number, number]; monthIdx: number }> = [
-    { start: [2, 21], monthIdx: 0 },   // فروردین از 21 مارس
-    { start: [3, 21], monthIdx: 1 },   // اردیبهشت از 21 آوریل
-    { start: [4, 22], monthIdx: 2 },   // خرداد از 22 می
-    { start: [5, 22], monthIdx: 3 },   // تیر از 22 ژوئن
-    { start: [6, 23], monthIdx: 4 },   // مرداد از 23 جولای
-    { start: [7, 23], monthIdx: 5 },   // شهریور از 23 آگوست
-    { start: [8, 23], monthIdx: 6 },   // مهر از 23 سپتامبر
-    { start: [9, 23], monthIdx: 7 },   // آبان از 23 اکتبر
-    { start: [10, 22], monthIdx: 8 },  // آذر از 22 نوامبر
-    { start: [11, 22], monthIdx: 9 },  // دی از 22 دسامبر
-    { start: [0, 21], monthIdx: 10 },  // بهمن از 21 ژانویه
-    { start: [1, 20], monthIdx: 11 },  // اسفند از 20 فوریه
+    { start: [2, 21], monthIdx: 0 },
+    { start: [3, 21], monthIdx: 1 },
+    { start: [4, 22], monthIdx: 2 },
+    { start: [5, 22], monthIdx: 3 },
+    { start: [6, 23], monthIdx: 4 },
+    { start: [7, 23], monthIdx: 5 },
+    { start: [8, 23], monthIdx: 6 },
+    { start: [9, 23], monthIdx: 7 },
+    { start: [10, 22], monthIdx: 8 },
+    { start: [11, 22], monthIdx: 9 },
+    { start: [0, 21], monthIdx: 10 },
+    { start: [1, 20], monthIdx: 11 },
   ];
 
-  // پیدا کردن ماه شمسی فعلی
   for (let i = persianMonthMap.length - 1; i >= 0; i--) {
     const { start, monthIdx } = persianMonthMap[i];
     if (month > start[0] || (month === start[0] && day >= start[1])) {
@@ -98,79 +92,96 @@ function getCurrentPersianMonthIndex(): number {
     }
   }
 
-  // اگر قبل از 21 مارس بودیم، اسفند است
   return 11;
 }
 
-// ماه فعلی (محاسبه شده از سیستم)
 const CURRENT_MONTH_INDEX = getCurrentPersianMonthIndex();
 
 // ══════════════════════════════════════════════════════════════════════════════
-// ضرایب امتیازدهی (مطابق با درخواست کاربر)
+// ضرایب امتیازدهی
 // ══════════════════════════════════════════════════════════════════════════════
 
 const COEFFICIENTS = {
+  // جریمه کشنده (Lethal Penalty) - به جای حذف Hard Filter
+  LETHAL_PENALTY: 0.1,
+
   // جهت منطقه
   REGION_MATCH: 1.5,
   REGION_MISMATCH: 0.8,
 
-  // دسته‌های کلی (تطابق کلمات: ارزان، لوکس، قطار، اتوبوس، هوایی، لحظه آخری)
+  // دسته‌های کلی
   GENERAL_MATCH: 1.5,
 
-  // مقصد (شهر یا کشور)
-  DESTINATION_MATCH: 2.0,      // شهر یا کشور یکسان
-  DESTINATION_MISMATCH: 0.7,   // مقصد متفاوت
+  // مقصد - ضرایب اصلاح‌شده
+  DESTINATION_CITY_MATCH: 2.0,          // شهر یکسان
+  DESTINATION_COUNTRY_MATCH: 0.5,       // کشور یکسان ولی شهر متفاوت
+  DESTINATION_DIFFERENT_COUNTRY: 0.4,   // کشورهای کاملاً متفاوت
 
   // حمل‌ونقل
   TRANSPORT_MATCH: 2.0,
   TRANSPORT_MISMATCH: 0.75,
-  TRANSPORT_NONE: 1.0,         // نداشت
+  TRANSPORT_NEUTRAL: 1.0,
 
   // ماه (وقتی source ماه دارد)
   MONTH_SAME: 3.0,
   MONTH_SAME_SEASON: 2.0,
-  MONTH_NEXT_SEASON_LAST_MONTH: 1.8,  // فقط اگر آخرین ماه فصل بود
-  MONTH_NEXT_SEASON_NOT_LAST: 0.8,    // اگر آخرین ماه فصل نبود
-  MONTH_NONE: 0.2,                     // نداشت
+  MONTH_NEXT_SEASON_LAST_MONTH: 1.8,
+  MONTH_NEXT_SEASON_NOT_LAST: 0.8,
 
   // فصل (وقتی source فصل دارد، نه ماه)
   SEASON_SAME: 3.0,
-  SEASON_MONTHS_IN_SEASON: 2.5,       // ماه‌های همان فصل
-  SEASON_NEXT: 2.0,                   // فصل بعد
-  SEASON_NONE: 0.2,                   // نداشت
+  SEASON_MONTHS_IN_SEASON: 2.5,
+  SEASON_NEXT: 2.0,
 
   // نوع سفر
   TRAVEL_TYPE_MATCH: 1.5,
   TRAVEL_TYPE_MISMATCH: 0.8,
+  TRAVEL_TYPE_NEUTRAL: 1.0,
 
   // برچسب کلاس تور
   TOUR_CLASS_MATCH: 2.0,
   TOUR_CLASS_MISMATCH: 0.75,
-  TOUR_CLASS_NONE: 1.0,        // نداشت
+  TOUR_CLASS_NEUTRAL: 1.0,
 
   // ستاره هتل
-  HOTEL_STAR_SAME: 1.8,        // هم‌رده
-  HOTEL_STAR_DIFF_1: 1.1,      // یک رده بالا/پایین
-  HOTEL_STAR_DIFF_2: 0.75,     // ۲ رده بالا/پایین
-  HOTEL_STAR_NONE: 1.0,        // نداشت
+  HOTEL_STAR_SAME: 1.8,
+  HOTEL_STAR_DIFF_1: 1.1,
+  HOTEL_STAR_DIFF_2: 0.75,
+  HOTEL_STAR_NEUTRAL: 1.0,
 
   // مبدا
   ORIGIN_MATCH: 3.0,
   ORIGIN_MISMATCH: 0.5,
-  ORIGIN_NONE: 1.0,            // نداشت
+  ORIGIN_NEUTRAL: 1.0,
 
-  // جریمه متقاطع (Cross-Penalty)
-  // صفحه مبدادار → تارگت زمان‌دار یا هتل‌دار
-  CROSS_PENALTY_ORIGIN_TO_TIME: 0.4,
-  CROSS_PENALTY_ORIGIN_TO_HOTEL: 0.4,
-  // صفحه زمان‌دار → تارگت مبدادار یا هتل‌دار
-  CROSS_PENALTY_TIME_TO_ORIGIN: 0.7,
-  CROSS_PENALTY_TIME_TO_HOTEL: 0.4,
-  // صفحه هتل‌دار → تارگت زمان‌دار یا مبدادار
-  CROSS_PENALTY_HOTEL_TO_TIME: 0.4,
-  CROSS_PENALTY_HOTEL_TO_ORIGIN: 0.4,
+  // نجات تورهای همیشگی (Evergreen Rescue)
+  EVERGREEN_RESCUE: 0.9,
 
-  // بونوس‌ها (برای UI - جدا از امتیاز اصلی)
+  // ماتریس جریمه متقاطع (Cross-Penalty Matrix)
+  // فقط برای صفحات تک‌هویتی
+  CROSS_PENALTY: {
+    // صفحه فقط زمان‌دار (بدون مبدا و هتل)
+    TIME_ONLY: {
+      TO_ORIGIN: 0.7,
+      TO_HOTEL: 0.4,
+    },
+    // صفحه فقط مبدادار (بدون زمان و هتل)
+    ORIGIN_ONLY: {
+      TO_TIME: 0.4,
+      TO_HOTEL: 0.4,
+    },
+    // صفحه فقط هتل‌دار (بدون زمان و مبدا)
+    HOTEL_ONLY: {
+      TO_TIME: 0.4,
+      TO_ORIGIN: 0.4,
+    },
+  },
+
+  // ضرایب صفحات مادر (God Multipliers)
+  MOTHER_CITY: 10000,
+  MOTHER_COUNTRY: 5000,
+
+  // بونوس‌ها
   ORIGIN_BONUS: 10,
   DESTINATION_BONUS: 5,
 } as const;
@@ -216,12 +227,10 @@ function extractGeneralKeywords(title: string): string[] {
 }
 
 function extractHotelStar(title: string, catStar?: unknown): number | null {
-  // اول از عنوان
   if (title) {
     const match = title.match(/(\d+)\s*ستاره/);
     if (match) return parseInt(match[1]);
   }
-  // بعد از دسته‌بندی
   if (catStar) {
     const numMatch = String(catStar).match(/(\d+)/);
     if (numMatch) return parseInt(numMatch[1]);
@@ -236,9 +245,7 @@ function hasOriginInTitle(title: string): boolean {
 
 function hasHotelInTitle(title: string, catHotel?: unknown): boolean {
   if (!title) return false;
-  // بررسی ستاره در عنوان
   if (/\d+\s*ستاره/.test(title)) return true;
-  // بررسی نام هتل در دسته‌بندی
   if (catHotel && String(catHotel).trim()) return true;
   return false;
 }
@@ -249,11 +256,6 @@ function getMonthSeasonIdx(monthIdx: number): number {
 
 function isLastMonthOfSeason(monthIdx: number): boolean {
   return monthIdx % 3 === 2;
-}
-
-function getSeasonMonths(seasonIdx: number): number[] {
-  const start = seasonIdx * 3;
-  return [start, start + 1, start + 2];
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -267,6 +269,10 @@ function parsePage(page: PageInfo, cat: Record<string, unknown>): ParsedPage {
   const season = extractSeason(title);
   const seasonIdx = season ? SEASONS_ORDER.indexOf(season) : -1;
   const generalKeywords = extractGeneralKeywords(title);
+  
+  const hasMonth = monthIdx !== -1;
+  const hasSeason = seasonIdx !== -1 && !hasMonth;
+  const hasTime = hasMonth || hasSeason;
 
   return {
     title,
@@ -284,8 +290,9 @@ function parsePage(page: PageInfo, cat: Record<string, unknown>): ParsedPage {
     tourClass: (cat['برچسب_کلاسی_تور'] as string) || null,
     regionDirection: (cat['جهت_در_منطقه'] as string) || null,
     hasOrigin: hasOriginInTitle(title),
-    hasMonth: monthIdx !== -1,
-    hasSeason: seasonIdx !== -1 && monthIdx === -1, // فقط اگر ماه نداشت
+    hasMonth,
+    hasSeason,
+    hasTime,
     hasHotel: hasHotelInTitle(title, cat['نام_دقیق_هتل']),
     generalKeywords,
     isGeneral: generalKeywords.length > 0,
@@ -305,12 +312,35 @@ function parseCategories(raw: unknown): Record<string, unknown> {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+// تشخیص هویت صفحه (برای ماتریس جریمه متقاطع)
+// ══════════════════════════════════════════════════════════════════════════════
+
+type PageIdentity = 'TIME_ONLY' | 'ORIGIN_ONLY' | 'HOTEL_ONLY' | 'MULTI' | 'NONE';
+
+function getPageIdentity(page: ParsedPage): PageIdentity {
+  const hasTime = page.hasTime;
+  const hasOrigin = page.hasOrigin;
+  const hasHotel = page.hasHotel;
+
+  const count = [hasTime, hasOrigin, hasHotel].filter(Boolean).length;
+
+  if (count === 0) return 'NONE';
+  if (count > 1) return 'MULTI';
+
+  if (hasTime) return 'TIME_ONLY';
+  if (hasOrigin) return 'ORIGIN_ONLY';
+  if (hasHotel) return 'HOTEL_ONLY';
+
+  return 'NONE';
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 // توابع محاسبه ضرایب جداگانه
 // ══════════════════════════════════════════════════════════════════════════════
 
-/** جهت منطقه - مشابه: 1.5 | غیرمشابه: 0.8 */
+/** جهت منطقه */
 function calcRegionScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag: string | null } {
-  // اگر source یا target جهت منطقه ندارد، ضریب خنثی
+  // خنثی: اگر یکی از طرفین ندارد
   if (!src.regionDirection || !tgt.regionDirection) {
     return { coef: 1.0, tag: null };
   }
@@ -320,13 +350,11 @@ function calcRegionScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag:
   return { coef: COEFFICIENTS.REGION_MISMATCH, tag: null };
 }
 
-/** دسته‌های کلی - تطابق کلمات: 1.5 */
+/** دسته‌های کلی */
 function calcGeneralScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag: string | null } {
-  // فقط وقتی تطابق کلمات کلی بین source و target باشد
   if (src.generalKeywords.length === 0) {
     return { coef: 1.0, tag: null };
   }
-  // بررسی تطابق کلمات کلی
   const hasMatch = src.generalKeywords.some(k => tgt.generalKeywords.includes(k));
   if (hasMatch) {
     return { coef: COEFFICIENTS.GENERAL_MATCH, tag: 'دسته_های_کلی' };
@@ -334,7 +362,12 @@ function calcGeneralScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag
   return { coef: 1.0, tag: null };
 }
 
-/** مقصد - مشابه: 2 | غیرمشابه: 0.7 */
+/**
+ * مقصد - با ضرایب اصلاح‌شده
+ * شهر یکسان: 2.0
+ * کشور یکسان ولی شهر متفاوت: 0.5
+ * کشور متفاوت: 0.4
+ */
 function calcDestinationScore(
   src: ParsedPage,
   tgt: ParsedPage
@@ -342,55 +375,60 @@ function calcDestinationScore(
   const srcHasDest = !!(src.city || src.country);
   const tgtHasDest = !!(tgt.city || tgt.country);
 
-  // اگر source یا target مقصد ندارد، ضریب خنثی
+  // خنثی: اگر یکی از طرفین مقصد ندارد
   if (!srcHasDest || !tgtHasDest) {
     return { coef: 1.0, tag: null, bonus: 0 };
   }
 
-  // مقصد مشابه = شهر یکسان یا کشور یکسان
+  // شهر یکسان
   if (src.city && tgt.city && src.city === tgt.city) {
     return {
-      coef: COEFFICIENTS.DESTINATION_MATCH,
+      coef: COEFFICIENTS.DESTINATION_CITY_MATCH,
       tag: 'شهر_یا_جزیره_مقصد',
       bonus: COEFFICIENTS.DESTINATION_BONUS,
     };
   }
 
+  // کشور یکسان ولی شهر متفاوت
   if (src.country && tgt.country && src.country === tgt.country) {
     return {
-      coef: COEFFICIENTS.DESTINATION_MATCH,
+      coef: COEFFICIENTS.DESTINATION_COUNTRY_MATCH,
       tag: 'کشور_مقصد',
       bonus: COEFFICIENTS.DESTINATION_BONUS,
     };
   }
 
-  // غیرمشابه
-  return { coef: COEFFICIENTS.DESTINATION_MISMATCH, tag: null, bonus: 0 };
+  // کشورهای کاملاً متفاوت
+  return { coef: COEFFICIENTS.DESTINATION_DIFFERENT_COUNTRY, tag: null, bonus: 0 };
 }
 
-/** حمل‌ونقل */
+/**
+ * حمل‌ونقل
+ * خنثی: اگر یکی از طرفین ندارد
+ * جریمه: فقط اگر هر دو دارند ولی متفاوت
+ */
 function calcTransportScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag: string | null } {
-  if (!src.transport) {
-    return { coef: COEFFICIENTS.TRANSPORT_NONE, tag: null };
+  // خنثی: اگر یکی از طرفین ندارد
+  if (!src.transport || !tgt.transport) {
+    return { coef: COEFFICIENTS.TRANSPORT_NEUTRAL, tag: null };
   }
-  if (!tgt.transport) {
-    return { coef: COEFFICIENTS.TRANSPORT_NONE, tag: null }; // نداشت = خنثی
-  }
+  // تطابق
   if (src.transport === tgt.transport) {
     return { coef: COEFFICIENTS.TRANSPORT_MATCH, tag: 'نوع_وسیله_نقلیه' };
   }
+  // تضاد
   return { coef: COEFFICIENTS.TRANSPORT_MISMATCH, tag: null };
 }
 
 /**
  * زمان (ماه/فصل)
- * این تابع پیچیده‌ترین بخش الگوریتم است.
+ * بدون Hard Filter - فقط جریمه کشنده (0.1)
  */
 function calcTimeScore(
   src: ParsedPage,
   tgt: ParsedPage,
   currentMonthIdx: number
-): { coef: number; tag: string | null; shouldFilter: boolean } {
+): { coef: number; tag: string | null } {
   // ─────────────────────────────────────────────────────────────
   // حالت ۱: سورس ماه دارد
   // ─────────────────────────────────────────────────────────────
@@ -398,65 +436,63 @@ function calcTimeScore(
     const srcMonthIdx = src.monthIdx;
     const srcSeasonIdx = getMonthSeasonIdx(srcMonthIdx);
 
-    // اگر تارگت ماه دارد
+    // تارگت ماه دارد
     if (tgt.hasMonth) {
       const tgtMonthIdx = tgt.monthIdx;
       const tgtSeasonIdx = getMonthSeasonIdx(tgtMonthIdx);
 
-      // فیلتر: ماه‌های گذشته نباید بیایند
+      // جریمه کشنده: ماه‌های گذشته
       if (tgtMonthIdx < currentMonthIdx) {
-        return { coef: 0, tag: null, shouldFilter: true };
+        return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
       }
 
       // همان ماه
       if (srcMonthIdx === tgtMonthIdx) {
-        return { coef: COEFFICIENTS.MONTH_SAME, tag: 'ماه_تقویمی_برگزاری', shouldFilter: false };
+        return { coef: COEFFICIENTS.MONTH_SAME, tag: 'ماه_تقویمی_برگزاری' };
       }
 
-      // همان فصل (فقط ماه‌های باقیمانده فصل)
+      // همان فصل (ماه‌های بعد از سورس)
       if (srcSeasonIdx === tgtSeasonIdx && tgtMonthIdx > srcMonthIdx) {
-        return { coef: COEFFICIENTS.MONTH_SAME_SEASON, tag: 'فصل_برگزاری', shouldFilter: false };
+        return { coef: COEFFICIENTS.MONTH_SAME_SEASON, tag: 'فصل_برگزاری' };
       }
 
-      // فصل بعدی (فقط اگر آخرین ماه فصل بود)
+      // فصل بعدی
       const nextSeasonIdx = (srcSeasonIdx + 1) % 4;
       if (tgtSeasonIdx === nextSeasonIdx) {
         if (isLastMonthOfSeason(srcMonthIdx)) {
-          return { coef: COEFFICIENTS.MONTH_NEXT_SEASON_LAST_MONTH, tag: null, shouldFilter: false };
-        } else {
-          return { coef: COEFFICIENTS.MONTH_NEXT_SEASON_NOT_LAST, tag: null, shouldFilter: false };
+          return { coef: COEFFICIENTS.MONTH_NEXT_SEASON_LAST_MONTH, tag: null };
         }
+        return { coef: COEFFICIENTS.MONTH_NEXT_SEASON_NOT_LAST, tag: null };
       }
 
-      // سایر ماه‌ها باید فیلتر شوند
-      return { coef: 0, tag: null, shouldFilter: true };
+      // سایر ماه‌ها - جریمه کشنده
+      return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
     }
 
-    // اگر تارگت فصل دارد (نه ماه)
+    // تارگت فصل دارد
     if (tgt.hasSeason) {
       const tgtSeasonIdx = tgt.seasonIdx;
 
       // همان فصل
       if (srcSeasonIdx === tgtSeasonIdx) {
-        return { coef: COEFFICIENTS.MONTH_SAME_SEASON, tag: 'فصل_برگزاری', shouldFilter: false };
+        return { coef: COEFFICIENTS.MONTH_SAME_SEASON, tag: 'فصل_برگزاری' };
       }
 
-      // فصل بعدی (فقط اگر آخرین ماه فصل بود)
+      // فصل بعدی
       const nextSeasonIdx = (srcSeasonIdx + 1) % 4;
       if (tgtSeasonIdx === nextSeasonIdx) {
         if (isLastMonthOfSeason(srcMonthIdx)) {
-          return { coef: COEFFICIENTS.MONTH_NEXT_SEASON_LAST_MONTH, tag: null, shouldFilter: false };
-        } else {
-          return { coef: COEFFICIENTS.MONTH_NEXT_SEASON_NOT_LAST, tag: null, shouldFilter: false };
+          return { coef: COEFFICIENTS.MONTH_NEXT_SEASON_LAST_MONTH, tag: null };
         }
+        return { coef: COEFFICIENTS.MONTH_NEXT_SEASON_NOT_LAST, tag: null };
       }
 
-      // فصل‌های دیگر باید فیلتر شوند
-      return { coef: 0, tag: null, shouldFilter: true };
+      // فصل‌های دیگر - جریمه کشنده
+      return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
     }
 
-    // تارگت زمان ندارد
-    return { coef: COEFFICIENTS.MONTH_NONE, tag: null, shouldFilter: false };
+    // تارگت زمان ندارد - جریمه کشنده (به جز Evergreen Rescue)
+    return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -465,101 +501,133 @@ function calcTimeScore(
   if (src.hasSeason) {
     const srcSeasonIdx = src.seasonIdx;
 
-    // اگر تارگت ماه دارد
+    // تارگت ماه دارد
     if (tgt.hasMonth) {
       const tgtMonthIdx = tgt.monthIdx;
       const tgtSeasonIdx = getMonthSeasonIdx(tgtMonthIdx);
 
-      // فیلتر: ماه‌های گذشته نباید بیایند
+      // جریمه کشنده: ماه‌های گذشته
       if (tgtMonthIdx < currentMonthIdx) {
-        return { coef: 0, tag: null, shouldFilter: true };
+        return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
       }
 
       // ماه‌های همان فصل
       if (srcSeasonIdx === tgtSeasonIdx) {
-        return { coef: COEFFICIENTS.SEASON_MONTHS_IN_SEASON, tag: 'فصل_برگزاری', shouldFilter: false };
+        return { coef: COEFFICIENTS.SEASON_MONTHS_IN_SEASON, tag: 'فصل_برگزاری' };
       }
 
       // فصل بعدی
       const nextSeasonIdx = (srcSeasonIdx + 1) % 4;
       if (tgtSeasonIdx === nextSeasonIdx) {
-        return { coef: COEFFICIENTS.SEASON_NEXT, tag: null, shouldFilter: false };
+        return { coef: COEFFICIENTS.SEASON_NEXT, tag: null };
       }
 
-      // سایر ماه‌ها فیلتر
-      return { coef: 0, tag: null, shouldFilter: true };
+      // سایر ماه‌ها - جریمه کشنده
+      return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
     }
 
-    // اگر تارگت فصل دارد
+    // تارگت فصل دارد
     if (tgt.hasSeason) {
       const tgtSeasonIdx = tgt.seasonIdx;
 
       // همان فصل
       if (srcSeasonIdx === tgtSeasonIdx) {
-        return { coef: COEFFICIENTS.SEASON_SAME, tag: 'فصل_برگزاری', shouldFilter: false };
+        return { coef: COEFFICIENTS.SEASON_SAME, tag: 'فصل_برگزاری' };
       }
 
       // فصل بعدی
       const nextSeasonIdx = (srcSeasonIdx + 1) % 4;
       if (tgtSeasonIdx === nextSeasonIdx) {
-        return { coef: COEFFICIENTS.SEASON_NEXT, tag: null, shouldFilter: false };
+        return { coef: COEFFICIENTS.SEASON_NEXT, tag: null };
       }
 
-      // فصل‌های دیگر فیلتر
-      return { coef: 0, tag: null, shouldFilter: true };
+      // فصل‌های دیگر - جریمه کشنده
+      return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
     }
 
-    // تارگت زمان ندارد
-    return { coef: COEFFICIENTS.SEASON_NONE, tag: null, shouldFilter: false };
+    // تارگت زمان ندارد - جریمه کشنده
+    return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
   }
 
   // ─────────────────────────────────────────────────────────────
-  // حالت ۳: سورس زمان ندارد
+  // حالت ۳: سورس زمان ندارد - خنثی
   // ─────────────────────────────────────────────────────────────
-  // اگر تارگت زمان دارد، ضریب 0.8 (نه فیلتر)
-  if (tgt.hasMonth || tgt.hasSeason) {
-    return { coef: 0.8, tag: null, shouldFilter: false };
-  }
-
-  return { coef: 1.0, tag: null, shouldFilter: false };
+  return { coef: 1.0, tag: null };
 }
 
-/** نوع سفر - مشابه: 1.5 | غیرمشابه: 0.8 */
+/**
+ * منطق نجات تورهای همیشگی (Evergreen Rescue)
+ * اگر تارگت زمان نداشت، به صورت پیش‌فرض جریمه کشنده می‌گیرد
+ * مگر اینکه: کلمات کلی (General) داشته باشد و مقصدش دقیقاً با سورس یکی باشد
+ */
+function calcEvergreenRescue(
+  src: ParsedPage,
+  tgt: ParsedPage
+): { shouldRescue: boolean; coef: number } {
+  // فقط وقتی سورس زمان دارد و تارگت ندارد
+  if (!src.hasTime || tgt.hasTime) {
+    return { shouldRescue: false, coef: 1.0 };
+  }
+
+  // شرط نجات: تارگت کلمات کلی دارد و مقصد دقیقاً یکسان است
+  const hasGeneralKeywords = tgt.isGeneral;
+  const sameCityDestination = src.city && tgt.city && src.city === tgt.city;
+  
+  if (hasGeneralKeywords && sameCityDestination) {
+    return { shouldRescue: true, coef: COEFFICIENTS.EVERGREEN_RESCUE };
+  }
+
+  return { shouldRescue: false, coef: 1.0 };
+}
+
+/**
+ * نوع سفر
+ * خنثی: اگر یکی از طرفین ندارد
+ * جریمه: فقط اگر هر دو دارند ولی متفاوت
+ */
 function calcTravelTypeScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag: string | null } {
   const srcType = src.travelType || src.tourType;
   const tgtType = tgt.travelType || tgt.tourType;
 
-  // اگر source یا target نوع سفر ندارد، ضریب خنثی
+  // خنثی: اگر یکی از طرفین ندارد
   if (!srcType || !tgtType) {
-    return { coef: 1.0, tag: null };
+    return { coef: COEFFICIENTS.TRAVEL_TYPE_NEUTRAL, tag: null };
   }
+  // تطابق
   if (srcType === tgtType) {
     return { coef: COEFFICIENTS.TRAVEL_TYPE_MATCH, tag: src.travelType ? 'نوع_سفر' : 'نوع_تور' };
   }
+  // تضاد
   return { coef: COEFFICIENTS.TRAVEL_TYPE_MISMATCH, tag: null };
 }
 
-/** برچسب کلاس تور */
+/**
+ * برچسب کلاس تور
+ * خنثی: اگر یکی از طرفین ندارد
+ * جریمه: فقط اگر هر دو دارند ولی متفاوت
+ */
 function calcTourClassScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag: string | null } {
-  if (!src.tourClass) {
-    return { coef: COEFFICIENTS.TOUR_CLASS_NONE, tag: null };
+  // خنثی: اگر یکی از طرفین ندارد
+  if (!src.tourClass || !tgt.tourClass) {
+    return { coef: COEFFICIENTS.TOUR_CLASS_NEUTRAL, tag: null };
   }
-  if (!tgt.tourClass) {
-    return { coef: COEFFICIENTS.TOUR_CLASS_NONE, tag: null }; // نداشت = خنثی
-  }
+  // تطابق
   if (src.tourClass === tgt.tourClass) {
     return { coef: COEFFICIENTS.TOUR_CLASS_MATCH, tag: 'برچسب_کلاسی_تور' };
   }
+  // تضاد
   return { coef: COEFFICIENTS.TOUR_CLASS_MISMATCH, tag: null };
 }
 
-/** ستاره هتل */
+/**
+ * ستاره هتل
+ * خنثی: اگر یکی از طرفین ندارد
+ * جریمه: فقط اگر هر دو دارند ولی متفاوت
+ */
 function calcHotelStarScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag: string | null } {
-  if (!src.hotelStar) {
-    return { coef: COEFFICIENTS.HOTEL_STAR_NONE, tag: null };
-  }
-  if (!tgt.hotelStar) {
-    return { coef: COEFFICIENTS.HOTEL_STAR_NONE, tag: null }; // نداشت = خنثی
+  // خنثی: اگر یکی از طرفین ندارد
+  if (!src.hotelStar || !tgt.hotelStar) {
+    return { coef: COEFFICIENTS.HOTEL_STAR_NEUTRAL, tag: null };
   }
 
   const diff = Math.abs(src.hotelStar - tgt.hotelStar);
@@ -572,83 +640,98 @@ function calcHotelStarScore(src: ParsedPage, tgt: ParsedPage): { coef: number; t
   return { coef: COEFFICIENTS.HOTEL_STAR_DIFF_2, tag: null };
 }
 
-/** مبدا */
+/**
+ * مبدا
+ * خنثی: اگر یکی از طرفین ندارد
+ * جریمه: فقط اگر هر دو دارند ولی متفاوت
+ */
 function calcOriginScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag: string | null; bonus: number } {
-  if (!src.hasOrigin) {
-    return { coef: COEFFICIENTS.ORIGIN_NONE, tag: null, bonus: 0 };
+  // خنثی: اگر یکی از طرفین ندارد
+  if (!src.hasOrigin || !tgt.hasOrigin) {
+    return { coef: COEFFICIENTS.ORIGIN_NEUTRAL, tag: null, bonus: 0 };
   }
-  if (!tgt.hasOrigin) {
-    return { coef: COEFFICIENTS.ORIGIN_NONE, tag: null, bonus: 0 }; // نداشت = خنثی
-  }
+  // تطابق
   if (src.origin && tgt.origin && src.origin === tgt.origin) {
     return { coef: COEFFICIENTS.ORIGIN_MATCH, tag: 'شهر_یا_استان_مبدا', bonus: COEFFICIENTS.ORIGIN_BONUS };
   }
+  // تضاد
   return { coef: COEFFICIENTS.ORIGIN_MISMATCH, tag: null, bonus: 0 };
 }
 
 /**
- * جریمه متقاطع (Cross-Penalty)
- * صفحات مبدادار/زمان‌دار/هتل‌دار نباید لینک‌های نامرتبط داشته باشند
+ * ماتریس جریمه متقاطع (Cross-Penalty Matrix)
+ * فقط برای صفحات تک‌هویتی
+ * صفحات چند‌هویتی یا بدون‌هویت از این جریمه معاف هستند
  */
-function calcCrossPenalty(src: ParsedPage, tgt: ParsedPage): { coef: number; tag: string | null } {
+function calcCrossPenalty(src: ParsedPage, tgt: ParsedPage): { coef: number } {
+  const srcIdentity = getPageIdentity(src);
+
+  // فقط صفحات تک‌هویتی جریمه متقاطع دریافت می‌کنند
+  if (srcIdentity === 'MULTI' || srcIdentity === 'NONE') {
+    return { coef: 1.0 };
+  }
+
   let penalty = 1.0;
 
-  // صفحه مبدادار
-  if (src.hasOrigin) {
-    if (tgt.hasMonth || tgt.hasSeason) {
-      penalty *= COEFFICIENTS.CROSS_PENALTY_ORIGIN_TO_TIME;
-    }
-    if (tgt.hasHotel) {
-      penalty *= COEFFICIENTS.CROSS_PENALTY_ORIGIN_TO_HOTEL;
-    }
+  switch (srcIdentity) {
+    case 'TIME_ONLY':
+      if (tgt.hasOrigin) {
+        penalty *= COEFFICIENTS.CROSS_PENALTY.TIME_ONLY.TO_ORIGIN;
+      }
+      if (tgt.hasHotel) {
+        penalty *= COEFFICIENTS.CROSS_PENALTY.TIME_ONLY.TO_HOTEL;
+      }
+      break;
+
+    case 'ORIGIN_ONLY':
+      if (tgt.hasTime) {
+        penalty *= COEFFICIENTS.CROSS_PENALTY.ORIGIN_ONLY.TO_TIME;
+      }
+      if (tgt.hasHotel) {
+        penalty *= COEFFICIENTS.CROSS_PENALTY.ORIGIN_ONLY.TO_HOTEL;
+      }
+      break;
+
+    case 'HOTEL_ONLY':
+      if (tgt.hasTime) {
+        penalty *= COEFFICIENTS.CROSS_PENALTY.HOTEL_ONLY.TO_TIME;
+      }
+      if (tgt.hasOrigin) {
+        penalty *= COEFFICIENTS.CROSS_PENALTY.HOTEL_ONLY.TO_ORIGIN;
+      }
+      break;
   }
 
-  // صفحه زمان‌دار
-  if (src.hasMonth || src.hasSeason) {
-    if (tgt.hasOrigin) {
-      penalty *= COEFFICIENTS.CROSS_PENALTY_TIME_TO_ORIGIN;
-    }
-    if (tgt.hasHotel) {
-      penalty *= COEFFICIENTS.CROSS_PENALTY_TIME_TO_HOTEL;
-    }
-  }
-
-  // صفحه هتل‌دار
-  if (src.hasHotel) {
-    if (tgt.hasMonth || tgt.hasSeason) {
-      penalty *= COEFFICIENTS.CROSS_PENALTY_HOTEL_TO_TIME;
-    }
-    if (tgt.hasOrigin) {
-      penalty *= COEFFICIENTS.CROSS_PENALTY_HOTEL_TO_ORIGIN;
-    }
-  }
-
-  if (penalty < 1.0) {
-    return { coef: penalty, tag: null };
-  }
-  return { coef: 1.0, tag: null };
+  return { coef: penalty };
 }
 
 /**
  * صفحات مادر (Mother Page)
- * صفحه اصلی شهر و کشور باید همیشه رتبه ۱ و ۲ باشند
- * به جای ضریب بالا، یک پرچم برمی‌گردانیم که در مرتب‌سازی استفاده شود
+ * صفحه اصلی شهر و کشور با ضریب بالا
  */
-function checkMotherPage(src: ParsedPage, tgt: ParsedPage): { isCityMother: boolean; isCountryMother: boolean } {
+function checkMotherPage(src: ParsedPage, tgt: ParsedPage): { 
+  isCityMother: boolean; 
+  isCountryMother: boolean;
+  multiplier: number;
+} {
   const tgtTitleClean = tgt.title.trim();
 
-  // صفحه مادر شهر: "تور استانبول" برای source با شهر استانبول
+  // صفحه مادر شهر: "تور استانبول"
   const isCityMother = !!(src.city && tgtTitleClean === `تور ${src.city}`);
   
-  // صفحه مادر کشور: "تور ترکیه" برای source با کشور ترکیه
+  // صفحه مادر کشور: "تور ترکیه"
   const isCountryMother = !!(src.country && tgtTitleClean === `تور ${src.country}`);
 
-  return { isCityMother, isCountryMother };
+  let multiplier = 1.0;
+  if (isCityMother) multiplier = COEFFICIENTS.MOTHER_CITY;
+  else if (isCountryMother) multiplier = COEFFICIENTS.MOTHER_COUNTRY;
+
+  return { isCityMother, isCountryMother, multiplier };
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
 // الگوریتم امتیازدهی اصلی
-// ═════════════════════════════════════════════════���════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
 
 function calculateScore(
   sourcePage: PageInfo,
@@ -657,23 +740,20 @@ function calculateScore(
   targetCat: Record<string, unknown>,
   currentMonthIdx: number = CURRENT_MONTH_INDEX
 ): ScoreResult {
-  // پارس کردن صفحات
   const src = parsePage(sourcePage, sourceCat);
   const tgt = parsePage(targetPage, targetCat);
 
-  // جمع‌آوری تگ‌ها و محاسبه امتیاز
   let score = 1.0;
   const matchedTags: string[] = [];
   let originBonus = 0;
   let destinationBonus = 0;
-  let shouldFilter = false;
 
   // ۱. جهت منطقه
   const region = calcRegionScore(src, tgt);
   score *= region.coef;
   if (region.tag) matchedTags.push(region.tag);
 
-  // ۲. دسته‌های کلی (تطابق کلمات کلی بین source و target)
+  // ۲. دسته‌های کلی
   const general = calcGeneralScore(src, tgt);
   score *= general.coef;
   if (general.tag) matchedTags.push(general.tag);
@@ -693,59 +773,68 @@ function calculateScore(
   const time = calcTimeScore(src, tgt, currentMonthIdx);
   score *= time.coef;
   if (time.tag) matchedTags.push(time.tag);
-  if (time.shouldFilter) shouldFilter = true;
 
-  // ۶. نوع سفر
+  // ۶. نجات تورهای همیشگی (Evergreen Rescue)
+  // فقط اگر امتیاز زمان، جریمه کشنده بود
+  if (time.coef === COEFFICIENTS.LETHAL_PENALTY) {
+    const evergreen = calcEvergreenRescue(src, tgt);
+    if (evergreen.shouldRescue) {
+      // لغو جریمه کشنده و اعمال ضریب نجات
+      score = (score / COEFFICIENTS.LETHAL_PENALTY) * evergreen.coef;
+    }
+  }
+
+  // ۷. نوع سفر
   const travelType = calcTravelTypeScore(src, tgt);
   score *= travelType.coef;
   if (travelType.tag) matchedTags.push(travelType.tag);
 
-  // ۷. برچسب کلاس تور
+  // ۸. برچسب کلاس تور
   const tourClass = calcTourClassScore(src, tgt);
   score *= tourClass.coef;
   if (tourClass.tag) matchedTags.push(tourClass.tag);
 
-  // ۸. ستاره هتل
+  // ۹. ستاره هتل
   const hotelStar = calcHotelStarScore(src, tgt);
   score *= hotelStar.coef;
   if (hotelStar.tag) matchedTags.push(hotelStar.tag);
 
-  // ۹. مبدا
+  // ۱۰. مبدا
   const origin = calcOriginScore(src, tgt);
   score *= origin.coef;
   if (origin.tag) matchedTags.push(origin.tag);
   originBonus = origin.bonus;
 
-  // ۱۰. جریمه متقاطع (Cross-Penalty)
+  // ۱۱. جریمه متقاطع (Cross-Penalty)
   const crossPenalty = calcCrossPenalty(src, tgt);
   score *= crossPenalty.coef;
 
-  // ۱۱. بررسی صفحات مادر (برای مرتب‌سازی ویژه)
+  // ۱۲. صفحات مادر (God Multipliers)
   const motherPage = checkMotherPage(src, tgt);
+  score *= motherPage.multiplier;
 
   return {
     score,
     matchedTags,
     originBonus,
     destinationBonus,
-    isFiltered: shouldFilter,
     isCityMother: motherPage.isCityMother,
     isCountryMother: motherPage.isCountryMother,
   };
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// نرمال‌سازی امتیاز
+// نرمال‌سازی امتیاز - فرمول لگاریتمی
 // ══════════════════════════════════════════════════════════════════════════════
 
 /**
- * نرمال‌سازی خطی به جای لگاریتمی
- * این روش تفاوت‌ها را حفظ می‌کند
+ * نرمال‌سازی لگاریتمی
+ * فرمول: (Math.log1p(raw) / Math.log1p(500)) * 10
+ * این روش تفاوت‌های کوچک را حفظ می‌کند و از فشرده شدن امتیازات جلوگیری می‌کند
  */
-function normalizeScore(raw: number, maxScore: number): number {
-  if (maxScore <= 0) return 0;
-  // نرمال‌سازی به بازه ۰-۱۰
-  const normalized = (raw / maxScore) * 10;
+function normalizeScore(raw: number): number {
+  if (raw <= 0) return 0;
+  const normalized = (Math.log1p(raw) / Math.log1p(500)) * 10;
   return parseFloat(Math.min(10, normalized).toFixed(2));
 }
 
@@ -774,33 +863,18 @@ export function findTopCandidates(
     const pageCat = parseCategories(page.categories);
     const result = calculateScore(sourcePage, sourceCat, page, pageCat, currentMonthIdx);
 
-    // فیلتر کردن صفحات نامعتبر
-    if (result.isFiltered) continue;
-    if (result.score <= 0) continue;
-
-    rawCandidates.push({ page, result });
-  }
-
-  // جدا کردن صفحات مادر از بقیه
-  const cityMother: typeof rawCandidates = [];
-  const countryMother: typeof rawCandidates = [];
-  const regularCandidates: typeof rawCandidates = [];
-
-  for (const candidate of rawCandidates) {
-    if (candidate.result.isCityMother) {
-      cityMother.push(candidate);
-    } else if (candidate.result.isCountryMother) {
-      countryMother.push(candidate);
-    } else {
-      regularCandidates.push(candidate);
+    // بدون Hard Filter - همه صفحات وارد می‌شوند
+    // صفحات با امتیاز بسیار پایین در قعر گراف دفن می‌شوند
+    if (result.score > 0) {
+      rawCandidates.push({ page, result });
     }
   }
 
-  // پیدا کردن حداکثر امتیاز از صفحات معمولی (بدون صفحات مادر)
-  const maxScore = regularCandidates.reduce((max, c) => Math.max(max, c.result.score), 1);
-
   // تابع تبدیل به CandidateWithTags
-  const toCandidate = ({ page, result }: typeof rawCandidates[0], normalizedScore: number): CandidateWithTags => ({
+  const toCandidate = (
+    { page, result }: typeof rawCandidates[0], 
+    normalizedScore: number
+  ): CandidateWithTags => ({
     page_id: (page as any).id!,
     title: page.title,
     score: normalizedScore,
@@ -811,24 +885,10 @@ export function findTopCandidates(
     categories: parseCategories(page.categories),
   });
 
-  // ساخت لیست نهایی
-  const candidates: CandidateWithTags[] = [];
-
-  // ۱. صفحه مادر شهر - رتبه ۱ (امتیاز ۱۰)
-  for (const c of cityMother) {
-    candidates.push(toCandidate(c, 10));
-  }
-
-  // ۲. صفحه مادر کشور - رتبه ۲ (امتیاز ۹.۹)
-  for (const c of countryMother) {
-    candidates.push(toCandidate(c, 9.9));
-  }
-
-  // ۳. بقیه صفحات با نرمال‌سازی (حداکثر ۹.۸)
-  for (const c of regularCandidates) {
-    const normalized = (c.result.score / maxScore) * 9.8;
-    candidates.push(toCandidate(c, parseFloat(normalized.toFixed(2))));
-  }
+  // نرمال‌سازی لگاریتمی و ساخت لیست نهایی
+  const candidates: CandidateWithTags[] = rawCandidates.map(c => 
+    toCandidate(c, normalizeScore(c.result.score))
+  );
 
   // مرتب‌سازی نزولی
   candidates.sort((a, b) => b.score - a.score);
