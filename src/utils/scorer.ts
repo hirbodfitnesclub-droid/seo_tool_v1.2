@@ -20,7 +20,9 @@ interface ScoreResult {
   matchedTags: string[];
   originBonus: number;
   destinationBonus: number;
-  isFiltered: boolean; // آیا باید از نتایج حذف شود؟
+  isFiltered: boolean;
+  isCityMother: boolean;    // صفحه مادر شهر (رتبه ۱)
+  isCountryMother: boolean; // صفحه مادر کشور (رتبه ۲)
 }
 
 interface PageInfo {
@@ -156,6 +158,17 @@ const COEFFICIENTS = {
   ORIGIN_MATCH: 3.0,
   ORIGIN_MISMATCH: 0.5,
   ORIGIN_NONE: 1.0,            // نداشت
+
+  // جریمه متقاطع (Cross-Penalty)
+  // صفحه مبدادار → تارگت زمان‌دار یا هتل‌دار
+  CROSS_PENALTY_ORIGIN_TO_TIME: 0.4,
+  CROSS_PENALTY_ORIGIN_TO_HOTEL: 0.4,
+  // صفحه زمان‌دار → تارگت مبدادار یا هتل‌دار
+  CROSS_PENALTY_TIME_TO_ORIGIN: 0.7,
+  CROSS_PENALTY_TIME_TO_HOTEL: 0.4,
+  // صفحه هتل‌دار → تارگت زمان‌دار یا مبدادار
+  CROSS_PENALTY_HOTEL_TO_TIME: 0.4,
+  CROSS_PENALTY_HOTEL_TO_ORIGIN: 0.4,
 
   // بونوس‌ها (برای UI - جدا از امتیاز اصلی)
   ORIGIN_BONUS: 10,
@@ -573,9 +586,69 @@ function calcOriginScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag:
   return { coef: COEFFICIENTS.ORIGIN_MISMATCH, tag: null, bonus: 0 };
 }
 
+/**
+ * جریمه متقاطع (Cross-Penalty)
+ * صفحات مبدادار/زمان‌دار/هتل‌دار نباید لینک‌های نامرتبط داشته باشند
+ */
+function calcCrossPenalty(src: ParsedPage, tgt: ParsedPage): { coef: number; tag: string | null } {
+  let penalty = 1.0;
+
+  // صفحه مبدادار
+  if (src.hasOrigin) {
+    if (tgt.hasMonth || tgt.hasSeason) {
+      penalty *= COEFFICIENTS.CROSS_PENALTY_ORIGIN_TO_TIME;
+    }
+    if (tgt.hasHotel) {
+      penalty *= COEFFICIENTS.CROSS_PENALTY_ORIGIN_TO_HOTEL;
+    }
+  }
+
+  // صفحه زمان‌دار
+  if (src.hasMonth || src.hasSeason) {
+    if (tgt.hasOrigin) {
+      penalty *= COEFFICIENTS.CROSS_PENALTY_TIME_TO_ORIGIN;
+    }
+    if (tgt.hasHotel) {
+      penalty *= COEFFICIENTS.CROSS_PENALTY_TIME_TO_HOTEL;
+    }
+  }
+
+  // صفحه هتل‌دار
+  if (src.hasHotel) {
+    if (tgt.hasMonth || tgt.hasSeason) {
+      penalty *= COEFFICIENTS.CROSS_PENALTY_HOTEL_TO_TIME;
+    }
+    if (tgt.hasOrigin) {
+      penalty *= COEFFICIENTS.CROSS_PENALTY_HOTEL_TO_ORIGIN;
+    }
+  }
+
+  if (penalty < 1.0) {
+    return { coef: penalty, tag: null };
+  }
+  return { coef: 1.0, tag: null };
+}
+
+/**
+ * صفحات مادر (Mother Page)
+ * صفحه اصلی شهر و کشور باید همیشه رتبه ۱ و ۲ باشند
+ * به جای ضریب بالا، یک پرچم برمی‌گردانیم که در مرتب‌سازی استفاده شود
+ */
+function checkMotherPage(src: ParsedPage, tgt: ParsedPage): { isCityMother: boolean; isCountryMother: boolean } {
+  const tgtTitleClean = tgt.title.trim();
+
+  // صفحه مادر شهر: "تور استانبول" برای source با شهر استانبول
+  const isCityMother = !!(src.city && tgtTitleClean === `تور ${src.city}`);
+  
+  // صفحه مادر کشور: "تور ترکیه" برای source با کشور ترکیه
+  const isCountryMother = !!(src.country && tgtTitleClean === `تور ${src.country}`);
+
+  return { isCityMother, isCountryMother };
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // الگوریتم امتیازدهی اصلی
-// ══════════════════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════════════════���════════════════════════════
 
 function calculateScore(
   sourcePage: PageInfo,
@@ -643,12 +716,21 @@ function calculateScore(
   if (origin.tag) matchedTags.push(origin.tag);
   originBonus = origin.bonus;
 
+  // ۱۰. جریمه متقاطع (Cross-Penalty)
+  const crossPenalty = calcCrossPenalty(src, tgt);
+  score *= crossPenalty.coef;
+
+  // ۱۱. بررسی صفحات مادر (برای مرتب‌سازی ویژه)
+  const motherPage = checkMotherPage(src, tgt);
+
   return {
     score,
     matchedTags,
     originBonus,
     destinationBonus,
     isFiltered: shouldFilter,
+    isCityMother: motherPage.isCityMother,
+    isCountryMother: motherPage.isCountryMother,
   };
 }
 
@@ -699,20 +781,54 @@ export function findTopCandidates(
     rawCandidates.push({ page, result });
   }
 
-  // پیدا کردن حداکثر امتیاز برای نرمال‌سازی
-  const maxScore = rawCandidates.reduce((max, c) => Math.max(max, c.result.score), 0);
+  // جدا کردن صفحات مادر از بقیه
+  const cityMother: typeof rawCandidates = [];
+  const countryMother: typeof rawCandidates = [];
+  const regularCandidates: typeof rawCandidates = [];
 
-  // ساخت لیست نهایی با نرمال‌سازی
-  const candidates: CandidateWithTags[] = rawCandidates.map(({ page, result }) => ({
+  for (const candidate of rawCandidates) {
+    if (candidate.result.isCityMother) {
+      cityMother.push(candidate);
+    } else if (candidate.result.isCountryMother) {
+      countryMother.push(candidate);
+    } else {
+      regularCandidates.push(candidate);
+    }
+  }
+
+  // پیدا کردن حداکثر امتیاز از صفحات معمولی (بدون صفحات مادر)
+  const maxScore = regularCandidates.reduce((max, c) => Math.max(max, c.result.score), 1);
+
+  // تابع تبدیل به CandidateWithTags
+  const toCandidate = ({ page, result }: typeof rawCandidates[0], normalizedScore: number): CandidateWithTags => ({
     page_id: (page as any).id!,
     title: page.title,
-    score: normalizeScore(result.score, maxScore),
+    score: normalizedScore,
     matched_tags: result.matchedTags,
     matchedTags: result.matchedTags,
     origin_bonus: result.originBonus,
     destination_bonus: result.destinationBonus,
     categories: parseCategories(page.categories),
-  }));
+  });
+
+  // ساخت لیست نهایی
+  const candidates: CandidateWithTags[] = [];
+
+  // ۱. صفحه مادر شهر - رتبه ۱ (امتیاز ۱۰)
+  for (const c of cityMother) {
+    candidates.push(toCandidate(c, 10));
+  }
+
+  // ۲. صفحه مادر کشور - رتبه ۲ (امتیاز ۹.۹)
+  for (const c of countryMother) {
+    candidates.push(toCandidate(c, 9.9));
+  }
+
+  // ۳. بقیه صفحات با نرمال‌سازی (حداکثر ۹.۸)
+  for (const c of regularCandidates) {
+    const normalized = (c.result.score / maxScore) * 9.8;
+    candidates.push(toCandidate(c, parseFloat(normalized.toFixed(2))));
+  }
 
   // مرتب‌سازی نزولی
   candidates.sort((a, b) => b.score - a.score);
