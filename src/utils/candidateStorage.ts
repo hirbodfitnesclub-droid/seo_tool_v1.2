@@ -6,8 +6,8 @@ import { computeIDFMap, type IDFMap } from './idfCalculator';
 export async function computeAndStoreCandidates(
   projectId: number,
   pages: Page[],
-  weights: Record<string, number>,
-  mode: 'linear' | 'weighted'
+  _weights: Record<string, number>,
+  _mode: 'linear' | 'weighted'
 ): Promise<void> {
   
   // ۱. محاسبه IDF برای کل پروژه
@@ -24,15 +24,17 @@ export async function computeAndStoreCandidates(
   // ۳. حذف کاندیداهای قبلی پروژه
   await db.candidates.where('project_id').equals(projectId).delete();
   
-  // ۴. تبدیل pages به فرمت مورد نیاز scorer
+  // ۴. تبدیل pages به فرمت مورد نیاز scorer (parse کردن categories از JSON)
   const pagesWithId = pages.map(p => ({
     id: p.id!,
     title: p.title,
-    categories: p.categories
+    categories: typeof p.categories === 'string' 
+      ? JSON.parse(p.categories) as Record<string, unknown>
+      : p.categories as Record<string, unknown>
   }));
   
-  // ۵. محاسبه کاندیداها با الگوریتم پیشرفته
-  const candidatesMap = computeAllCandidates(pagesWithId, weights, idfMap, mode);
+  // ۵. محاسبه کاندیداها با الگوریتم پیشرفته (بدون نیاز به weights و idfMap)
+  const candidatesMap = computeAllCandidates(pagesWithId);
   
   // ۶. آماده‌سازی رکوردها
   const now = new Date().toISOString();
