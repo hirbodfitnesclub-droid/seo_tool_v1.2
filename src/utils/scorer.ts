@@ -5,7 +5,7 @@ export interface CandidateWithTags {
   title: string;
   score: number;
   matched_tags: string[];
-  matchedTags: string[]; // رونوشت برای همخوانی کامل با بخش‌های دیگر پروژه
+  matchedTags: string[];
   origin_bonus: number;
   destination_bonus: number;
   categories?: any;
@@ -13,15 +13,353 @@ export interface CandidateWithTags {
 
 const SEASONS_ORDER = ['بهار', 'تابستان', 'پاییز', 'زمستان'];
 
+// دسته‌های کلی (ترکیب کلاس تور و وسیله نقلیه)
+const GENERAL_KEYWORDS = ['ارزان', 'لوکس', 'قطار', 'اتوبوس', 'هوایی', 'زمینی', 'لحظه آخری'];
+const TRANSPORT_KEYWORDS = ['هوایی', 'قطار', 'اتوبوس', 'کشتی', 'زمینی'];
+
+// حداکثر تئوری (بدون احتساب صفحات مادر) حدود ۵۰۰ است.
+const LOG_NORMALIZER = Math.log1p(500);
+
 export function normalizeMonth(month: string): string {
   if (!month) return month;
-  if (month === 'نوروز') return 'فروردین';
+  if (month === 'نوروز' || month === 'نوروزی') return 'فروردین';
   return month;
 }
 
+// ──────────────────────────────────────────────
+// توابع استخراج از H1
+// ──────────────────────────────────────────────
+
+function extractMonthFromTitle(title: string): string | null {
+  if (!title) return null;
+  if (title.includes('نوروز') || title.includes('نوروزی')) return 'فروردین';
+  for (const m of PERSIAN_MONTHS_ORDER) {
+    if (title.includes(m)) return m;
+  }
+  return null;
+}
+
+function extractSeasonFromTitle(title: string): string | null {
+  if (!title) return null;
+  for (const s of SEASONS_ORDER) {
+    if (title.includes(s)) return s;
+  }
+  return null;
+}
+
+function extractTransportFromTitle(title: string): string | null {
+  if (!title) return null;
+  for (const t of TRANSPORT_KEYWORDS) {
+    if (title.includes(t)) return t;
+  }
+  return null;
+}
+
+function extractGeneralKeywords(title: string): string[] {
+  if (!title) return [];
+  return GENERAL_KEYWORDS.filter(k => title.includes(k));
+}
+
+function extractHotelStarFromTitle(title: string): number | null {
+  if (!title) return null;
+  const match = title.match(/(\d+)\s*ستاره/);
+  return match ? parseInt(match[1]) : null;
+}
+
+function hasOriginInTitle(title: string): boolean {
+  if (!title) return false;
+  return title.includes(' از ');
+}
+
+function getMonthSeasonIdx(monthIdx: number): number {
+  return Math.floor(monthIdx / 3);
+}
+
+function isLastMonthOfSeason(monthIdx: number): boolean {
+  return monthIdx % 3 === 2;
+}
+
+function normalizeScore(raw: number): number {
+  return parseFloat(Math.min(10, (Math.log1p(raw) / LOG_NORMALIZER) * 10).toFixed(2));
+}
+
+// ──────────────────────────────────────────────
+// الگوریتم امتیازدهی اصلی (موتور سئو)
+// ──────────────────────────────────────────────
+
+function calculateScore(
+  sourcePage: any, sourceCat: any,
+  targetPage: any, targetCat: any
+): { score: number; matchedTags: string[]; originBonus: number; destinationBonus: number } {
+  let score = 1.0;
+  const matchedTags: string[] = [];
+  let originBonus = 0;
+  let destinationBonus = 0;
+
+  const sTitle = sourcePage.title || '';
+  const tTitle = targetPage.title || '';
+
+  // بررسی اینکه آیا تارگت کلمات جادویی را دارد یا نه
+  const tgtGenerals = extractGeneralKeywords(tTitle);
+  const isTgtGeneral = tgtGenerals.length > 0;
+
+  // ۱. جهت منطقه
+  const srcRegion = sourceCat['جهت_در_منطقه'];
+  const tgtRegion = targetCat['جهت_در_منطقه'];
+  if (srcRegion) {
+    if (tgtRegion && srcRegion === tgtRegion) {
+      score *= 1.5;
+      matchedTags.push('جهت_در_منطقه');
+    } else {
+      score *= 0.8;
+    }
+  }
+
+  // ۲. دسته‌های کلی (پاداش ۱.۵ قطعی برای تارگت‌های دارای کلمات خاص)
+  if (isTgtGeneral) {
+    score *= 1.5;
+    matchedTags.push('دسته_های_کلی');
+  }
+
+  // ۳. مقصد
+  const srcCity = sourceCat['شهر_یا_جزیره_مقصد']?.trim();
+  const tgtCity = targetCat['شهر_یا_جزیره_مقصد']?.trim();
+  const srcCountry = sourceCat['کشور_مقصد']?.trim();
+  const tgtCountry = targetCat['کشور_مقصد']?.trim();
+  const srcHasDest = !!(srcCity || srcCountry);
+  const tgtHasDest = !!(tgtCity || tgtCountry);
+
+  let isExactDest = false; // 🔴 پرچم برای تشخیص مقصد دقیقاً یکسان
+
+  if (srcHasDest) {
+    if (tgtHasDest) {
+      if (srcCity && tgtCity && srcCity === tgtCity) {
+        score *= 2.0; destinationBonus = 5; matchedTags.push('شهر_یا_جزیره_مقصد');
+        isExactDest = true; // شهر یکی است
+      } else if (srcCountry && tgtCountry && srcCountry === tgtCountry) {
+        score *= 0.5; matchedTags.push('هم_کشور');
+        if (!srcCity && !tgtCity) {
+          isExactDest = true; // هیچکدام شهر ندارند ولی کشور یکی است
+        }
+      } else {
+        score *= 0.4;
+      }
+    } else {
+      score *= 0.4;
+    }
+  }
+
+  // ۴. حمل‌ونقل 
+  const srcTransport = extractTransportFromTitle(sTitle);
+  if (srcTransport) {
+    const tgtTransport = extractTransportFromTitle(tTitle);
+    if (tgtTransport) {
+      if (srcTransport === tgtTransport) {
+        score *= 2.0; matchedTags.push('نوع_وسیله_نقلیه');
+      } else {
+        score *= 0.75;
+      }
+    } else {
+      score *= 0.75;
+    }
+  }
+
+  // ۵ و ۶. زمان (ماه و فصل)
+  const sMonth = extractMonthFromTitle(sTitle);
+  const tMonth = extractMonthFromTitle(tTitle);
+  const sSeason = extractSeasonFromTitle(sTitle);
+  const tSeason = extractSeasonFromTitle(tTitle);
+
+  const sMonthIdx = sMonth ? PERSIAN_MONTHS_ORDER.indexOf(sMonth) : -1;
+  const tMonthIdx = tMonth ? PERSIAN_MONTHS_ORDER.indexOf(tMonth) : -1;
+
+  let timeMulti = 1.0;
+
+  if (sMonthIdx !== -1) {
+    if (tMonthIdx !== -1) {
+      if (sMonthIdx === tMonthIdx) { 
+        timeMulti = 3.0; matchedTags.push('ماه_تقویمی_برگزاری'); 
+      } else {
+        const sSzn = getMonthSeasonIdx(sMonthIdx);
+        const tSzn = getMonthSeasonIdx(tMonthIdx);
+        if (sSzn === tSzn) { 
+          timeMulti = 2.0; matchedTags.push('فصل_برگزاری'); 
+        } else if (tSzn === (sSzn + 1) % 4) { 
+          timeMulti = isLastMonthOfSeason(sMonthIdx) ? 1.8 : 0.1; 
+        } else { 
+          timeMulti = 0.1; 
+        }
+      }
+    } else if (tSeason) {
+      const sSzn = getMonthSeasonIdx(sMonthIdx);
+      const tSzn = SEASONS_ORDER.indexOf(tSeason);
+      if (sSzn === tSzn) { 
+        timeMulti = 2.0; matchedTags.push('فصل_برگزاری'); 
+      } else if (tSzn === (sSzn + 1) % 4) { 
+        timeMulti = isLastMonthOfSeason(sMonthIdx) ? 1.8 : 0.1; 
+      } else { 
+        timeMulti = 0.1; 
+      }
+    } else { 
+      // 🔴 نجات فقط برای دسته‌های کلی که دقیقاً همان مقصد را دارند
+      timeMulti = (isTgtGeneral && isExactDest) ? 0.9 : 0.1; 
+    }
+  } else if (sSeason) {
+    const sSzn = SEASONS_ORDER.indexOf(sSeason);
+    if (tMonthIdx !== -1) {
+      const tSzn = getMonthSeasonIdx(tMonthIdx);
+      if (sSzn === tSzn) { 
+        timeMulti = 2.5; matchedTags.push('فصل_برگزاری'); 
+      } else if (tSzn === (sSzn + 1) % 4) { 
+        timeMulti = 1.2; 
+      } else { 
+        timeMulti = 0.1; 
+      }
+    } else if (tSeason) {
+      const tSzn = SEASONS_ORDER.indexOf(tSeason);
+      if (sSzn === tSzn) { 
+        timeMulti = 3.0; matchedTags.push('فصل_برگزاری'); 
+      } else if (tSzn === (sSzn + 1) % 4) { 
+        timeMulti = 1.2; 
+      } else { 
+        timeMulti = 0.1; 
+      }
+    } else { 
+      // 🔴 نجات فقط برای دسته‌های کلی که دقیقاً همان مقصد را دارند
+      timeMulti = (isTgtGeneral && isExactDest) ? 0.9 : 0.1; 
+    }
+  } else {
+    if (tMonthIdx !== -1 || tSeason) { 
+      timeMulti = 0.8; 
+    }
+  }
+  score *= timeMulti;
+
+  // ۷. نوع سفر/تور
+  const sType = sourceCat['نوع_سفر'] || sourceCat['نوع_تور'];
+  const tType = targetCat['نوع_سفر'] || targetCat['نوع_تور'];
+  if (sType) {
+    if (tType) {
+      if (sType === tType) {
+        score *= 1.5; matchedTags.push(sourceCat['نوع_سفر'] ? 'نوع_سفر' : 'نوع_تور');
+      } else { score *= 0.8; }
+    } else { score *= 0.8; }
+  }
+
+  // ۸. برچسب کلاس تور
+  const sClass = sourceCat['برچسب_کلاسی_تور'];
+  const tClass = targetCat['برچسب_کلاسی_تور'];
+  if (sClass) {
+    if (tClass) {
+      if (sClass === tClass) {
+        score *= 2.0; matchedTags.push('برچسب_کلاسی_تور');
+      } else { score *= 0.75; }
+    } else { score *= 0.75; }
+  }
+
+  // ۹. ستاره هتل
+  const sStarH1 = extractHotelStarFromTitle(sTitle);
+  const tStarH1 = extractHotelStarFromTitle(tTitle);
+  const sStarCat = sourceCat['تعداد_ستاره_هتل'];
+  const tStarCat = targetCat['تعداد_ستاره_هتل'];
+  
+  const sNum = sStarH1 || parseInt(String(sStarCat).match(/(\d+)/)?.[1] || '0');
+  const tNum = tStarH1 || parseInt(String(tStarCat).match(/(\d+)/)?.[1] || '0');
+
+  if (sNum) {
+    if (tNum) {
+      const diff = Math.abs(sNum - tNum);
+      if (diff === 0) { score *= 1.8; matchedTags.push('تعداد_ستاره_هتل'); }
+      else if (diff === 1) score *= 1.1;
+      else score *= 0.75;
+    } else { score *= 0.75; }
+  }
+
+  // ۱۰. مبدا
+  const srcHasOrigin = hasOriginInTitle(sTitle);
+  const tgtHasOrigin = hasOriginInTitle(tTitle);
+
+  if (srcHasOrigin) {
+    if (tgtHasOrigin) {
+      const srcOrigVal = sourceCat['شهر_یا_استان_مبدا'];
+      const tgtOrigVal = targetCat['شهر_یا_استان_مبدا'];
+      if (srcOrigVal && tgtOrigVal && srcOrigVal === tgtOrigVal) {
+        score *= 3.0; originBonus = 10; matchedTags.push('شهر_یا_استان_مبدا');
+      } else {
+        score *= 0.3;
+      }
+    } else {
+      score *= 0.3; 
+    }
+  }
+
+  // ──────────────────────────────────────────────
+  // 👑 ضریب مگا (God Multiplier) برای صفحات مادر
+  // ──────────────────────────────────────────────
+  const tTitleClean = tTitle.trim();
+  
+  if (srcCity && tTitleClean === `تور ${srcCity}`) {
+    score *= 10000;
+    matchedTags.push('صفحه_مادر_شهر');
+  } else if (srcCountry && tTitleClean === `تور ${srcCountry}`) {
+    score *= 5000;
+    matchedTags.push('صفحه_مادر_کشور');
+  }
+
+  return { score, matchedTags, originBonus, destinationBonus };
+}
+
+// ──────────────────────────────────────────────
+// توابع عمومی
+// ──────────────────────────────────────────────
+
+export function findTopCandidates(
+  sourcePage: any,
+  allPages: any[],
+  ...args: any[]
+): CandidateWithTags[] {
+  let sourceCat: any = {};
+  if (typeof sourcePage.categories === 'string') {
+    try { sourceCat = JSON.parse(sourcePage.categories); } catch { sourceCat = {}; }
+  } else {
+    sourceCat = sourcePage.categories || {};
+  }
+
+  const candidates: CandidateWithTags[] = [];
+
+  for (const page of allPages) {
+    if (page.id === sourcePage.id) continue;
+
+    let pageCat: any = {};
+    if (typeof page.categories === 'string') {
+      try { pageCat = JSON.parse(page.categories); } catch { pageCat = {}; }
+    } else {
+      pageCat = page.categories || {};
+    }
+
+    const { score, matchedTags, originBonus, destinationBonus } = calculateScore(
+      sourcePage, sourceCat, page, pageCat
+    );
+
+    candidates.push({
+      page_id: page.id!,
+      title: page.title,
+      score: normalizeScore(score),
+      matched_tags: matchedTags,
+      matchedTags,
+      origin_bonus: originBonus,
+      destination_bonus: destinationBonus,
+      categories: pageCat
+    });
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates;
+}
+
 export function computeAllCandidates(
-  pages: any[], 
-  ...args: any[] 
+  pages: any[],
+  ...args: any[]
 ): Map<number, CandidateWithTags[]> {
   const map = new Map<number, CandidateWithTags[]>();
   for (const page of pages) {
@@ -30,265 +368,3 @@ export function computeAllCandidates(
   }
   return map;
 }
-
-export function findTopCandidates(
-  sourcePage: any, 
-  allPages: any[],
-  ...args: any[] 
-): CandidateWithTags[] {
-  let sourceCat: any = {};
-  if (typeof sourcePage.categories === 'string') {
-    try { sourceCat = JSON.parse(sourcePage.categories); } catch { sourceCat = {}; }
-  } else {
-    sourceCat = sourcePage.categories || {};
-  }
-  
-  const candidates: CandidateWithTags[] = [];
-  
-  for (const page of allPages) {
-    if (page.id === sourcePage.id) continue;
-    
-    let pageCat: any = {};
-    if (typeof page.categories === 'string') {
-      try { pageCat = JSON.parse(page.categories); } catch { pageCat = {}; }
-    } else {
-      pageCat = page.categories || {};
-    }
-    
-    const { score, matchedTags } = calculateMultiplierScore(sourcePage, sourceCat, page, pageCat);
-    
-    candidates.push({
-      page_id: page.id!,
-      title: page.title,
-      score: parseFloat(score.toFixed(3)),
-      matched_tags: matchedTags,
-      matchedTags: matchedTags,
-      origin_bonus: 0,
-      destination_bonus: 0,
-      categories: pageCat
-    });
-  }
-  
-  candidates.sort((a, b) => b.score - a.score);
-  return candidates;
-}
-
-function calculateMultiplierScore(sourcePage: any, sourceCat: any, targetPage: any, targetCat: any): {score: number, matchedTags: string[]} {
-    let score = 1.0;
-    const matchedTags: string[] = [];
-
-    const matchTag = (key: string) => {
-      if (sourceCat[key] && targetCat[key] && sourceCat[key] === targetCat[key]) {
-        matchedTags.push(key);
-      }
-    };
-
-    // 1. جهت منطقه
-    const srcRegion = sourceCat['جهت_در_منطقه'];
-    const tgtRegion = targetCat['جهت_در_منطقه'];
-    if (!srcRegion && tgtRegion) {
-        score *= 1.0; 
-    } else if (srcRegion && !tgtRegion) {
-        score *= 0.8;
-    } else if (srcRegion && tgtRegion) {
-        if (srcRegion === tgtRegion) { score *= 1.5; matchTag('جهت_در_منطقه'); }
-        else { score *= 0.8; }
-    }
-
-    // 2. دسته های کلی
-    const generalKeywords = ['ارزان', 'لوکس', 'قطار', 'اتوبوس', 'هوایی', 'لحظه آخری'];
-    const sTitle = sourcePage.title || '';
-    const tTitle = targetPage.title || '';
-    let hasMatchedGeneral = false;
-    for (const word of generalKeywords) {
-        if (sTitle.includes(word) && tTitle.includes(word)) {
-            hasMatchedGeneral = true;
-            break;
-        }
-    }
-    if (hasMatchedGeneral) {
-        score *= 1.5;
-        matchedTags.push('دسته_های_کلی');
-    }
-
-    // 3. مقصد
-    const srcDestCity = sourceCat['شهر_یا_جزیره_مقصد'];
-    const tgtDestCity = targetCat['شهر_یا_جزیره_مقصد'];
-    const srcDestCountry = sourceCat['کشور_مقصد'];
-    const tgtDestCountry = targetCat['کشور_مقصد'];
-    
-    const sDest = srcDestCity || srcDestCountry;
-    const tDest = tgtDestCity || tgtDestCountry;
-
-    if (!sDest && tDest) {
-        score *= 1.0;
-    } else if (sDest && !tDest) {
-        score *= 0.7;
-    } else if (sDest && tDest) {
-        let isDestMatch = false;
-        if (srcDestCity && tgtDestCity && srcDestCity === tgtDestCity) {
-            isDestMatch = true;
-        } else if (!srcDestCity && !tgtDestCity && srcDestCountry && tgtDestCountry && srcDestCountry === tgtDestCountry) {
-            isDestMatch = true;
-        }
-        
-        if (isDestMatch) {
-            score *= 2.0;
-            if (srcDestCity) matchTag('شهر_یا_جزیره_مقصد');
-            if (srcDestCountry) matchTag('کشور_مقصد');
-        } else {
-            score *= 0.7;
-        }
-    }
-
-    // 4. حمل و نقل
-    const sTrans = sourceCat['نوع_وسیله_نقلیه'];
-    const tTrans = targetCat['نوع_وسیله_نقلیه'];
-    if (!sTrans && tTrans) {
-        score *= 1.0;
-    } else if (sTrans && !tTrans) {
-        score *= 0.75;
-    } else if (sTrans && tTrans) {
-        if (sTrans === tTrans) { score *= 2.0; matchTag('نوع_وسیله_نقلیه'); }
-        else { score *= 0.75; }
-    }
-
-    // 5. ماه و 6. فصل
-    const sMonthRaw = sourceCat['ماه_تقویمی_برگزاری'];
-    const tMonthRaw = targetCat['ماه_تقویمی_برگزاری'];
-    const sSeasonRaw = sourceCat['فصل_برگزاری'];
-    const tSeasonRaw = targetCat['فصل_برگزاری'];
-
-    const sMonth = sMonthRaw ? normalizeMonth(sMonthRaw) : null;
-    const tMonth = tMonthRaw ? normalizeMonth(tMonthRaw) : null;
-    const sMonthIdx = sMonth ? PERSIAN_MONTHS_ORDER.indexOf(sMonth) : -1;
-    const tMonthIdx = tMonth ? PERSIAN_MONTHS_ORDER.indexOf(tMonth) : -1;
-
-    let timeMulti = 1.0;
-
-    if (sMonthIdx !== -1) {
-        if (tMonthIdx !== -1) {
-            if (sMonthIdx === tMonthIdx) {
-                timeMulti *= 3;
-                matchTag('ماه_تقویمی_برگزاری');
-            } else {
-                const sSeasonIdx = Math.floor(sMonthIdx / 3);
-                const tSeasonIdx = Math.floor(tMonthIdx / 3);
-                if (sSeasonIdx === tSeasonIdx) {
-                    timeMulti *= 2; 
-                } else if (tSeasonIdx === ((sSeasonIdx + 1) % 4)) {
-                    const isLateMonth = (sMonthIdx % 3 === 2);
-                    if (isLateMonth) timeMulti *= 1.8;
-                    else timeMulti *= 0.8;
-                } else {
-                    timeMulti *= 0.2;
-                }
-            }
-        } else if (tSeasonRaw) {
-            const sSeasonIdx = Math.floor(sMonthIdx / 3);
-            const tSeasonIdx = SEASONS_ORDER.indexOf(tSeasonRaw);
-            if (sSeasonIdx === tSeasonIdx) {
-                timeMulti *= 2;
-            } else if (tSeasonIdx === ((sSeasonIdx + 1) % 4)) {
-                const isLateMonth = (sMonthIdx % 3 === 2);
-                if (isLateMonth) timeMulti *= 1.8;
-                else timeMulti *= 0.8;
-            } else {
-                timeMulti *= 0.2;
-            }
-        } else {
-            timeMulti *= 0.2;
-        }
-    } else if (sSeasonRaw) {
-        const sSeasonIdx = SEASONS_ORDER.indexOf(sSeasonRaw);
-        if (tMonthIdx !== -1) {
-            const tSeasonIdx = Math.floor(tMonthIdx / 3);
-            if (sSeasonIdx === tSeasonIdx) {
-                timeMulti *= 2.5; 
-            } else if (tSeasonIdx === ((sSeasonIdx + 1) % 4)) {
-                timeMulti *= 2; 
-            } else {
-                timeMulti *= 0.2;
-            }
-        } else if (tSeasonRaw) {
-            const tSeasonIdx = SEASONS_ORDER.indexOf(tSeasonRaw);
-            if (sSeasonIdx === tSeasonIdx) {
-                timeMulti *= 3; 
-                matchTag('فصل_برگزاری');
-            } else if (tSeasonIdx === ((sSeasonIdx + 1) % 4)) {
-                timeMulti *= 2; 
-            } else {
-                timeMulti *= 0.2;
-            }
-        } else {
-            timeMulti *= 0.2;
-        }
-    } else {
-        if (tMonthIdx !== -1 || tSeasonRaw) {
-            timeMulti *= 0.2;
-        }
-    }
-    score *= timeMulti;
-
-    // 7. نوع سفر
-    const sType = sourceCat['نوع_سفر'] || sourceCat['نوع_تور'];
-    const tType = targetCat['نوع_سفر'] || targetCat['نوع_تور'];
-    if (!sType && tType) {
-        score *= 1.0;
-    } else if (sType && !tType) {
-        score *= 0.8;
-    } else if (sType && tType) {
-        if (sType === tType) { score *= 1.5; matchTag(sourceCat['نوع_سفر'] ? 'نوع_سفر' : 'نوع_تور'); }
-        else score *= 0.8;
-    }
-
-    // 8. برچسب کلاس تور
-    const sClass = sourceCat['برچسب_کلاسی_تور'];
-    const tClass = targetCat['برچسب_کلاسی_تور'];
-    if (!sClass && tClass) {
-        score *= 1.0;
-    } else if (sClass && !tClass) {
-        score *= 0.75;
-    } else if (sClass && tClass) {
-        if (sClass === tClass) { score *= 2.0; matchTag('برچسب_کلاسی_تور'); }
-        else { score *= 0.75; }
-    }
-
-    // 9. ستاره هتل
-    const sStar = sourceCat['تعداد_ستاره_هتل'];
-    const tStar = targetCat['تعداد_ستاره_هتل'];
-    if (!sStar && tStar) {
-        score *= 1.0;
-    } else if (sStar && !tStar) {
-        score *= 0.75;
-    } else if (sStar && tStar) {
-        const sMatch = String(sStar).match(/(\d+)/);
-        const tMatch = String(tStar).match(/(\d+)/);
-        if (sMatch && tMatch) {
-            const sInt = parseInt(sMatch[1]);
-            const tInt = parseInt(tMatch[1]);
-            const diff = Math.abs(sInt - tInt);
-            if (diff === 0) { score *= 1.8; matchTag('تعداد_ستاره_هتل'); }
-            else if (diff === 1) score *= 1.1;
-            else score *= 0.75; 
-        } else {
-            if (sStar === tStar) { score *= 1.8; matchTag('تعداد_ستاره_هتل'); }
-            else score *= 0.75;
-        }
-    }
-
-    // 10. مبدا
-    const sOrig = sourceCat['شهر_یا_استان_مبدا'];
-    const tOrig = targetCat['شهر_یا_استان_مبدا'];
-    if (!sOrig && tOrig) {
-        score *= 1.0;
-    } else if (sOrig && !tOrig) {
-        score *= 0.5;
-    } else if (sOrig && tOrig) {
-        if (sOrig === tOrig) { score *= 3.0; matchTag('شهر_یا_استان_مبدا'); }
-        else { score *= 0.5; }
-    }
-
-    return { score, matchedTags };
-}
-
