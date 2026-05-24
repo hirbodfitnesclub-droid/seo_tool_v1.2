@@ -7,7 +7,8 @@ import { PERSIAN_MONTHS_ORDER, MONTH_TO_SEASON } from '../constants/categories';
 export interface CandidateWithTags {
   page_id: number;
   title: string;
-  score: number;
+  score: number;           // امتیاز نرمالایز شده برای نمایش UI
+  rawScore: number;        // امتیاز خام برای مرتب‌سازی
   matched_tags: string[];
   matchedTags: string[];
   origin_bonus: number;
@@ -49,7 +50,7 @@ interface ParsedPage {
   hasMonth: boolean;
   hasSeason: boolean;
   hasHotel: boolean;
-  hasTime: boolean; // ماه یا فصل دارد
+  hasTime: boolean;
   generalKeywords: string[];
   isGeneral: boolean;
 }
@@ -62,6 +63,12 @@ const SEASONS_ORDER = ['بهار', 'تابستان', 'پاییز', 'زمستان
 const GENERAL_KEYWORDS = ['ارزان', 'لوکس', 'قطار', 'اتوبوس', 'هوایی', 'زمینی', 'لحظه آخری'];
 const TRANSPORT_KEYWORDS = ['هوایی', 'قطار', 'اتوبوس', 'کشتی', 'زمینی'];
 
+// تعداد ماه‌ها در سال شمسی
+const MONTHS_IN_YEAR = 12;
+
+// پنجره زمانی معتبر (چند ماه آینده قابل قبول است)
+const VALID_FUTURE_WINDOW = 4;
+
 /**
  * محاسبه ماه شمسی فعلی بر اساس تاریخ میلادی
  */
@@ -71,18 +78,18 @@ function getCurrentPersianMonthIndex(): number {
   const day = now.getDate();
 
   const persianMonthMap: Array<{ start: [number, number]; monthIdx: number }> = [
-    { start: [2, 21], monthIdx: 0 },
-    { start: [3, 21], monthIdx: 1 },
-    { start: [4, 22], monthIdx: 2 },
-    { start: [5, 22], monthIdx: 3 },
-    { start: [6, 23], monthIdx: 4 },
-    { start: [7, 23], monthIdx: 5 },
-    { start: [8, 23], monthIdx: 6 },
-    { start: [9, 23], monthIdx: 7 },
-    { start: [10, 22], monthIdx: 8 },
-    { start: [11, 22], monthIdx: 9 },
-    { start: [0, 21], monthIdx: 10 },
-    { start: [1, 20], monthIdx: 11 },
+    { start: [2, 21], monthIdx: 0 },   // فروردین
+    { start: [3, 21], monthIdx: 1 },   // اردیبهشت
+    { start: [4, 22], monthIdx: 2 },   // خرداد
+    { start: [5, 22], monthIdx: 3 },   // تیر
+    { start: [6, 23], monthIdx: 4 },   // مرداد
+    { start: [7, 23], monthIdx: 5 },   // شهریور
+    { start: [8, 23], monthIdx: 6 },   // مهر
+    { start: [9, 23], monthIdx: 7 },   // آبان
+    { start: [10, 22], monthIdx: 8 },  // آذر
+    { start: [11, 22], monthIdx: 9 },  // دی
+    { start: [0, 21], monthIdx: 10 },  // بهمن
+    { start: [1, 20], monthIdx: 11 },  // اسفند
   ];
 
   for (let i = persianMonthMap.length - 1; i >= 0; i--) {
@@ -113,9 +120,9 @@ const COEFFICIENTS = {
   GENERAL_MATCH: 1.5,
 
   // مقصد - ضرایب اصلاح‌شده
-  DESTINATION_CITY_MATCH: 2.0,          // شهر یکسان
-  DESTINATION_COUNTRY_MATCH: 0.5,       // کشور یکسان ولی شهر متفاوت
-  DESTINATION_DIFFERENT_COUNTRY: 0.4,   // کشورهای کاملاً متفاوت
+  DESTINATION_CITY_MATCH: 2.0,
+  DESTINATION_COUNTRY_MATCH: 0.5,
+  DESTINATION_DIFFERENT_COUNTRY: 0.4,
 
   // حمل‌ونقل
   TRANSPORT_MATCH: 2.0,
@@ -157,20 +164,19 @@ const COEFFICIENTS = {
   // نجات تورهای همیشگی (Evergreen Rescue)
   EVERGREEN_RESCUE: 0.9,
 
+  // نامتقارنی زمان: سورس بدون زمان، تارگت با زمان
+  TIME_ASYMMETRY_PENALTY: 0.8,
+
   // ماتریس جریمه متقاطع (Cross-Penalty Matrix)
-  // فقط برای صفحات تک‌هویتی
   CROSS_PENALTY: {
-    // صفحه فقط زمان‌دار (بدون مبدا و هتل)
     TIME_ONLY: {
       TO_ORIGIN: 0.7,
       TO_HOTEL: 0.4,
     },
-    // صفحه فقط مبدادار (بدون زمان و هتل)
     ORIGIN_ONLY: {
       TO_TIME: 0.4,
       TO_HOTEL: 0.4,
     },
-    // صفحه فقط هتل‌دار (بدون زمان و مبدا)
     HOTEL_ONLY: {
       TO_TIME: 0.4,
       TO_ORIGIN: 0.4,
@@ -258,6 +264,59 @@ function isLastMonthOfSeason(monthIdx: number): boolean {
   return monthIdx % 3 === 2;
 }
 
+/**
+ * محاسبه فاصله چرخشی بین دو ماه (Circular Distance)
+ * این تابع فاصله را در جهت آینده محاسبه می‌کند
+ * مثال: از دی (9) به فروردین (0) = 3 ماه (نه -9)
+ */
+function getCircularMonthDistance(fromMonth: number, toMonth: number): number {
+  return (toMonth - fromMonth + MONTHS_IN_YEAR) % MONTHS_IN_YEAR;
+}
+
+/**
+ * آیا ماه تارگت در پنجره زمانی معتبر است؟
+ * با استفاده از ریاضیات چرخشی (Modulo)
+ */
+function isMonthInValidWindow(targetMonthIdx: number, currentMonthIdx: number): boolean {
+  const distance = getCircularMonthDistance(currentMonthIdx, targetMonthIdx);
+  // ماه فعلی (distance = 0) یا ماه‌های آینده تا حداکثر VALID_FUTURE_WINDOW ماه
+  return distance >= 0 && distance <= VALID_FUTURE_WINDOW;
+}
+
+/**
+ * آیا ماه تارگت در گذشته است؟
+ * با استفاده از ریاضیات چرخشی
+ * ماه‌هایی که فاصله‌شان بیشتر از پنجره آینده است، "گذشته" محسوب می‌شوند
+ */
+function isMonthInPast(targetMonthIdx: number, currentMonthIdx: number): boolean {
+  const distance = getCircularMonthDistance(currentMonthIdx, targetMonthIdx);
+  // اگر فاصله بیشتر از پنجره معتبر باشد، یعنی گذشته است
+  return distance > VALID_FUTURE_WINDOW;
+}
+
+/**
+ * آیا ماه تارگت در فصل بعدی نسبت به سورس است؟
+ */
+function isInNextSeason(srcMonthIdx: number, tgtMonthIdx: number): boolean {
+  const srcSeasonIdx = getMonthSeasonIdx(srcMonthIdx);
+  const tgtSeasonIdx = getMonthSeasonIdx(tgtMonthIdx);
+  const nextSeasonIdx = (srcSeasonIdx + 1) % 4;
+  return tgtSeasonIdx === nextSeasonIdx;
+}
+
+/**
+ * آیا ماه تارگت در همان فصل سورس است و بعد از آن می‌آید؟
+ */
+function isInSameSeasonAfter(srcMonthIdx: number, tgtMonthIdx: number): boolean {
+  const srcSeasonIdx = getMonthSeasonIdx(srcMonthIdx);
+  const tgtSeasonIdx = getMonthSeasonIdx(tgtMonthIdx);
+  if (srcSeasonIdx !== tgtSeasonIdx) return false;
+  
+  // استفاده از فاصله چرخشی برای مقایسه
+  const distance = getCircularMonthDistance(srcMonthIdx, tgtMonthIdx);
+  return distance > 0 && distance <= 2; // حداکثر 2 ماه در یک فصل
+}
+
 // ══════════════════════════════════════════════════════════════════════════════
 // پارس کردن صفحه
 // ══════════════════════════════════════════════════════════════════════════════
@@ -340,7 +399,6 @@ function getPageIdentity(page: ParsedPage): PageIdentity {
 
 /** جهت منطقه */
 function calcRegionScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag: string | null } {
-  // خنثی: اگر یکی از طرفین ندارد
   if (!src.regionDirection || !tgt.regionDirection) {
     return { coef: 1.0, tag: null };
   }
@@ -375,12 +433,10 @@ function calcDestinationScore(
   const srcHasDest = !!(src.city || src.country);
   const tgtHasDest = !!(tgt.city || tgt.country);
 
-  // خنثی: اگر یکی از طرفین مقصد ندارد
   if (!srcHasDest || !tgtHasDest) {
     return { coef: 1.0, tag: null, bonus: 0 };
   }
 
-  // شهر یکسان
   if (src.city && tgt.city && src.city === tgt.city) {
     return {
       coef: COEFFICIENTS.DESTINATION_CITY_MATCH,
@@ -389,7 +445,6 @@ function calcDestinationScore(
     };
   }
 
-  // کشور یکسان ولی شهر متفاوت
   if (src.country && tgt.country && src.country === tgt.country) {
     return {
       coef: COEFFICIENTS.DESTINATION_COUNTRY_MATCH,
@@ -398,7 +453,6 @@ function calcDestinationScore(
     };
   }
 
-  // کشورهای کاملاً متفاوت
   return { coef: COEFFICIENTS.DESTINATION_DIFFERENT_COUNTRY, tag: null, bonus: 0 };
 }
 
@@ -408,21 +462,32 @@ function calcDestinationScore(
  * جریمه: فقط اگر هر دو دارند ولی متفاوت
  */
 function calcTransportScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag: string | null } {
-  // خنثی: اگر یکی از طرفین ندارد
   if (!src.transport || !tgt.transport) {
     return { coef: COEFFICIENTS.TRANSPORT_NEUTRAL, tag: null };
   }
-  // تطابق
   if (src.transport === tgt.transport) {
     return { coef: COEFFICIENTS.TRANSPORT_MATCH, tag: 'نوع_وسیله_نقلیه' };
   }
-  // تضاد
   return { coef: COEFFICIENTS.TRANSPORT_MISMATCH, tag: null };
 }
 
 /**
- * زمان (ماه/فصل)
- * بدون Hard Filter - فقط جریمه کشنده (0.1)
+ * بررسی شرط نجات تورهای همیشگی (Evergreen Rescue)
+ * شرط: تارگت کلمات کلی دارد و مقصد دقیقاً یکسان است
+ */
+function checkEvergreenRescue(src: ParsedPage, tgt: ParsedPage): boolean {
+  const hasGeneralKeywords = tgt.isGeneral;
+  const sameCityDestination = src.city && tgt.city && src.city === tgt.city;
+  return hasGeneralKeywords && sameCityDestination;
+}
+
+/**
+ * زمان (ماه/فصل) - با ریاضیات چرخشی
+ * 
+ * این تابع منطق کامل زمان را پیاده‌سازی می‌کند:
+ * - از ریاضیات چرخشی (Modulo) برای جلوگیری از تله تقویم استفاده می‌کند
+ * - منطق نجات تورهای همیشگی (Evergreen Rescue) داخل همین تابع است
+ * - نامتقارنی زمان (سورس بدون زمان، تارگت با زمان) را مدیریت می‌کند
  */
 function calcTimeScore(
   src: ParsedPage,
@@ -441,8 +506,8 @@ function calcTimeScore(
       const tgtMonthIdx = tgt.monthIdx;
       const tgtSeasonIdx = getMonthSeasonIdx(tgtMonthIdx);
 
-      // جریمه کشنده: ماه‌های گذشته
-      if (tgtMonthIdx < currentMonthIdx) {
+      // جریمه کشنده: ماه‌های گذشته (با ریاضیات چرخشی)
+      if (isMonthInPast(tgtMonthIdx, currentMonthIdx)) {
         return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
       }
 
@@ -452,13 +517,12 @@ function calcTimeScore(
       }
 
       // همان فصل (ماه‌های بعد از سورس)
-      if (srcSeasonIdx === tgtSeasonIdx && tgtMonthIdx > srcMonthIdx) {
+      if (isInSameSeasonAfter(srcMonthIdx, tgtMonthIdx)) {
         return { coef: COEFFICIENTS.MONTH_SAME_SEASON, tag: 'فصل_برگزاری' };
       }
 
       // فصل بعدی
-      const nextSeasonIdx = (srcSeasonIdx + 1) % 4;
-      if (tgtSeasonIdx === nextSeasonIdx) {
+      if (isInNextSeason(srcMonthIdx, tgtMonthIdx)) {
         if (isLastMonthOfSeason(srcMonthIdx)) {
           return { coef: COEFFICIENTS.MONTH_NEXT_SEASON_LAST_MONTH, tag: null };
         }
@@ -491,7 +555,12 @@ function calcTimeScore(
       return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
     }
 
-    // تارگت زمان ندارد - جریمه کشنده (به جز Evergreen Rescue)
+    // تارگت زمان ندارد - بررسی Evergreen Rescue
+    if (checkEvergreenRescue(src, tgt)) {
+      return { coef: COEFFICIENTS.EVERGREEN_RESCUE, tag: null };
+    }
+    
+    // بدون نجات - جریمه کشنده
     return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
   }
 
@@ -506,8 +575,8 @@ function calcTimeScore(
       const tgtMonthIdx = tgt.monthIdx;
       const tgtSeasonIdx = getMonthSeasonIdx(tgtMonthIdx);
 
-      // جریمه کشنده: ماه‌های گذشته
-      if (tgtMonthIdx < currentMonthIdx) {
+      // جریمه کشنده: ماه‌های گذشته (با ریاضیات چرخشی)
+      if (isMonthInPast(tgtMonthIdx, currentMonthIdx)) {
         return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
       }
 
@@ -545,39 +614,27 @@ function calcTimeScore(
       return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
     }
 
-    // تارگت زمان ندارد - جریمه کشنده
+    // تارگت زمان ندارد - بررسی Evergreen Rescue
+    if (checkEvergreenRescue(src, tgt)) {
+      return { coef: COEFFICIENTS.EVERGREEN_RESCUE, tag: null };
+    }
+    
+    // بدون نجات - جریمه کشنده
     return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
   }
 
   // ─────────────────────────────────────────────────────────────
-  // حالت ۳: سورس زمان ندارد - خنثی
+  // حالت ۳: سورس زمان ندارد
   // ─────────────────────────────────────────────────────────────
-  return { coef: 1.0, tag: null };
-}
-
-/**
- * منطق نجات تورهای همیشگی (Evergreen Rescue)
- * اگر تارگت زمان نداشت، به صورت پیش‌فرض جریمه کشنده می‌گیرد
- * مگر اینکه: کلمات کلی (General) داشته باشد و مقصدش دقیقاً با سورس یکی باشد
- */
-function calcEvergreenRescue(
-  src: ParsedPage,
-  tgt: ParsedPage
-): { shouldRescue: boolean; coef: number } {
-  // فقط وقتی سورس زمان دارد و تارگت ندارد
-  if (!src.hasTime || tgt.hasTime) {
-    return { shouldRescue: false, coef: 1.0 };
-  }
-
-  // شرط نجات: تارگت کلمات کلی دارد و مقصد دقیقاً یکسان است
-  const hasGeneralKeywords = tgt.isGeneral;
-  const sameCityDestination = src.city && tgt.city && src.city === tgt.city;
   
-  if (hasGeneralKeywords && sameCityDestination) {
-    return { shouldRescue: true, coef: COEFFICIENTS.EVERGREEN_RESCUE };
+  // اگر تارگت زمان دارد - جریمه نامتقارنی (نه خنثی!)
+  // تور بدون زمان نباید به تورهای زمان‌دار لینک‌های قوی بدهد
+  if (tgt.hasTime) {
+    return { coef: COEFFICIENTS.TIME_ASYMMETRY_PENALTY, tag: null };
   }
 
-  return { shouldRescue: false, coef: 1.0 };
+  // هر دو بدون زمان - خنثی
+  return { coef: 1.0, tag: null };
 }
 
 /**
@@ -589,15 +646,12 @@ function calcTravelTypeScore(src: ParsedPage, tgt: ParsedPage): { coef: number; 
   const srcType = src.travelType || src.tourType;
   const tgtType = tgt.travelType || tgt.tourType;
 
-  // خنثی: اگر یکی از طرفین ندارد
   if (!srcType || !tgtType) {
     return { coef: COEFFICIENTS.TRAVEL_TYPE_NEUTRAL, tag: null };
   }
-  // تطابق
   if (srcType === tgtType) {
     return { coef: COEFFICIENTS.TRAVEL_TYPE_MATCH, tag: src.travelType ? 'نوع_سفر' : 'نوع_تور' };
   }
-  // تضاد
   return { coef: COEFFICIENTS.TRAVEL_TYPE_MISMATCH, tag: null };
 }
 
@@ -607,15 +661,12 @@ function calcTravelTypeScore(src: ParsedPage, tgt: ParsedPage): { coef: number; 
  * جریمه: فقط اگر هر دو دارند ولی متفاوت
  */
 function calcTourClassScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag: string | null } {
-  // خنثی: اگر یکی از طرفین ندارد
   if (!src.tourClass || !tgt.tourClass) {
     return { coef: COEFFICIENTS.TOUR_CLASS_NEUTRAL, tag: null };
   }
-  // تطابق
   if (src.tourClass === tgt.tourClass) {
     return { coef: COEFFICIENTS.TOUR_CLASS_MATCH, tag: 'برچسب_کلاسی_تور' };
   }
-  // تضاد
   return { coef: COEFFICIENTS.TOUR_CLASS_MISMATCH, tag: null };
 }
 
@@ -625,7 +676,6 @@ function calcTourClassScore(src: ParsedPage, tgt: ParsedPage): { coef: number; t
  * جریمه: فقط اگر هر دو دارند ولی متفاوت
  */
 function calcHotelStarScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag: string | null } {
-  // خنثی: اگر یکی از طرفین ندارد
   if (!src.hotelStar || !tgt.hotelStar) {
     return { coef: COEFFICIENTS.HOTEL_STAR_NEUTRAL, tag: null };
   }
@@ -646,27 +696,22 @@ function calcHotelStarScore(src: ParsedPage, tgt: ParsedPage): { coef: number; t
  * جریمه: فقط اگر هر دو دارند ولی متفاوت
  */
 function calcOriginScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag: string | null; bonus: number } {
-  // خنثی: اگر یکی از طرفین ندارد
   if (!src.hasOrigin || !tgt.hasOrigin) {
     return { coef: COEFFICIENTS.ORIGIN_NEUTRAL, tag: null, bonus: 0 };
   }
-  // تطابق
   if (src.origin && tgt.origin && src.origin === tgt.origin) {
     return { coef: COEFFICIENTS.ORIGIN_MATCH, tag: 'شهر_یا_استان_مبدا', bonus: COEFFICIENTS.ORIGIN_BONUS };
   }
-  // تضاد
   return { coef: COEFFICIENTS.ORIGIN_MISMATCH, tag: null, bonus: 0 };
 }
 
 /**
  * ماتریس جریمه متقاطع (Cross-Penalty Matrix)
  * فقط برای صفحات تک‌هویتی
- * صفحات چند‌هویتی یا بدون‌هویت از این جریمه معاف هستند
  */
 function calcCrossPenalty(src: ParsedPage, tgt: ParsedPage): { coef: number } {
   const srcIdentity = getPageIdentity(src);
 
-  // فقط صفحات تک‌هویتی جریمه متقاطع دریافت می‌کنند
   if (srcIdentity === 'MULTI' || srcIdentity === 'NONE') {
     return { coef: 1.0 };
   }
@@ -707,7 +752,6 @@ function calcCrossPenalty(src: ParsedPage, tgt: ParsedPage): { coef: number } {
 
 /**
  * صفحات مادر (Mother Page)
- * صفحه اصلی شهر و کشور با ضریب بالا
  */
 function checkMotherPage(src: ParsedPage, tgt: ParsedPage): { 
   isCityMother: boolean; 
@@ -716,10 +760,7 @@ function checkMotherPage(src: ParsedPage, tgt: ParsedPage): {
 } {
   const tgtTitleClean = tgt.title.trim();
 
-  // صفحه مادر شهر: "تور استانبول"
   const isCityMother = !!(src.city && tgtTitleClean === `تور ${src.city}`);
-  
-  // صفحه مادر کشور: "تور ترکیه"
   const isCountryMother = !!(src.country && tgtTitleClean === `تور ${src.country}`);
 
   let multiplier = 1.0;
@@ -769,47 +810,37 @@ function calculateScore(
   score *= transport.coef;
   if (transport.tag) matchedTags.push(transport.tag);
 
-  // ۵. زمان (ماه/فصل)
+  // ۵. زمان (ماه/فصل) - شامل Evergreen Rescue و نامتقارنی
   const time = calcTimeScore(src, tgt, currentMonthIdx);
   score *= time.coef;
   if (time.tag) matchedTags.push(time.tag);
 
-  // ۶. نجات تورهای همیشگی (Evergreen Rescue)
-  // فقط اگر امتیاز زمان، جریمه کشنده بود
-  if (time.coef === COEFFICIENTS.LETHAL_PENALTY) {
-    const evergreen = calcEvergreenRescue(src, tgt);
-    if (evergreen.shouldRescue) {
-      // لغو جریمه کشنده و اعمال ضریب نجات
-      score = (score / COEFFICIENTS.LETHAL_PENALTY) * evergreen.coef;
-    }
-  }
-
-  // ۷. نوع سفر
+  // ۶. نوع سفر
   const travelType = calcTravelTypeScore(src, tgt);
   score *= travelType.coef;
   if (travelType.tag) matchedTags.push(travelType.tag);
 
-  // ۸. برچسب کلاس تور
+  // ۷. برچسب کلاس تور
   const tourClass = calcTourClassScore(src, tgt);
   score *= tourClass.coef;
   if (tourClass.tag) matchedTags.push(tourClass.tag);
 
-  // ۹. ستاره هتل
+  // ۸. ستاره هتل
   const hotelStar = calcHotelStarScore(src, tgt);
   score *= hotelStar.coef;
   if (hotelStar.tag) matchedTags.push(hotelStar.tag);
 
-  // ۱۰. مبدا
+  // ۹. مبدا
   const origin = calcOriginScore(src, tgt);
   score *= origin.coef;
   if (origin.tag) matchedTags.push(origin.tag);
   originBonus = origin.bonus;
 
-  // ۱۱. جریمه متقاطع (Cross-Penalty)
+  // ۱۰. جریمه متقاطع (Cross-Penalty)
   const crossPenalty = calcCrossPenalty(src, tgt);
   score *= crossPenalty.coef;
 
-  // ۱۲. صفحات مادر (God Multipliers)
+  // ۱۱. صفحات مادر (God Multipliers)
   const motherPage = checkMotherPage(src, tgt);
   score *= motherPage.multiplier;
 
@@ -824,13 +855,15 @@ function calculateScore(
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// نرمال‌سازی امتیاز - فرمول لگاریتمی
+// نرمال‌سازی امتیاز - فرمول لگاریتمی (فقط برای نمایش UI)
 // ══════════════════════════════════════════════════════════════════════════════
 
 /**
  * نرمال‌سازی لگاریتمی
  * فرمول: (Math.log1p(raw) / Math.log1p(500)) * 10
- * این روش تفاوت‌های کوچک را حفظ می‌کند و از فشرده شدن امتیازات جلوگیری می‌کند
+ * 
+ * نکته مهم: این تابع فقط برای نمایش در UI استفاده می‌شود.
+ * مرتب‌سازی باید روی امتیاز خام (Raw Score) انجام شود.
  */
 function normalizeScore(raw: number): number {
   if (raw <= 0) return 0;
@@ -864,34 +897,26 @@ export function findTopCandidates(
     const result = calculateScore(sourcePage, sourceCat, page, pageCat, currentMonthIdx);
 
     // بدون Hard Filter - همه صفحات وارد می‌شوند
-    // صفحات با امتیاز بسیار پایین در قعر گراف دفن می‌شوند
     if (result.score > 0) {
       rawCandidates.push({ page, result });
     }
   }
 
-  // تابع تبدیل به CandidateWithTags
-  const toCandidate = (
-    { page, result }: typeof rawCandidates[0], 
-    normalizedScore: number
-  ): CandidateWithTags => ({
+  // قانون ریشه‌ای: مرتب‌سازی روی امتیاز خام (Raw Score)
+  rawCandidates.sort((a, b) => b.result.score - a.result.score);
+
+  // تبدیل به CandidateWithTags با امتیاز نرمالایز شده برای UI
+  const candidates: CandidateWithTags[] = rawCandidates.map(({ page, result }) => ({
     page_id: (page as any).id!,
     title: page.title,
-    score: normalizedScore,
+    score: normalizeScore(result.score),    // برای نمایش UI
+    rawScore: result.score,                   // برای مرتب‌سازی و دیباگ
     matched_tags: result.matchedTags,
     matchedTags: result.matchedTags,
     origin_bonus: result.originBonus,
     destination_bonus: result.destinationBonus,
     categories: parseCategories(page.categories),
-  });
-
-  // نرمال‌سازی لگاریتمی و ساخت لیست نهایی
-  const candidates: CandidateWithTags[] = rawCandidates.map(c => 
-    toCandidate(c, normalizeScore(c.result.score))
-  );
-
-  // مرتب‌سازی نزولی
-  candidates.sort((a, b) => b.score - a.score);
+  }));
 
   return candidates;
 }
