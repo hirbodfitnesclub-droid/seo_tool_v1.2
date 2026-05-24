@@ -111,71 +111,55 @@ const COEFFICIENTS = {
   // جهت منطقه
   REGION_MATCH: 1.5,
   REGION_MISMATCH: 0.8,
-  REGION_NONE: 1.0,
 
-  // دسته‌های کلی
-  GENERAL_BONUS: 1.5,
+  // دسته‌های کلی (تطابق کلمات: ارزان، لوکس، قطار، اتوبوس، هوایی، لحظه آخری)
+  GENERAL_MATCH: 1.5,
 
-  // مقصد
-  DESTINATION_SAME_CITY: 2.0,
-  DESTINATION_SAME_COUNTRY: 0.7,
-  DESTINATION_MISMATCH: 0.7,
-  DESTINATION_NONE: 1.0,
+  // مقصد (شهر یا کشور)
+  DESTINATION_MATCH: 2.0,      // شهر یا کشور یکسان
+  DESTINATION_MISMATCH: 0.7,   // مقصد متفاوت
 
   // حمل‌ونقل
   TRANSPORT_MATCH: 2.0,
   TRANSPORT_MISMATCH: 0.75,
-  TRANSPORT_NONE: 1.0,
+  TRANSPORT_NONE: 1.0,         // نداشت
 
   // ماه (وقتی source ماه دارد)
   MONTH_SAME: 3.0,
   MONTH_SAME_SEASON: 2.0,
-  MONTH_NEXT_SEASON_LAST_MONTH: 1.8,
-  MONTH_NEXT_SEASON_NOT_LAST: 0.8,
-  MONTH_NONE: 0.2,
+  MONTH_NEXT_SEASON_LAST_MONTH: 1.8,  // فقط اگر آخرین ماه فصل بود
+  MONTH_NEXT_SEASON_NOT_LAST: 0.8,    // اگر آخرین ماه فصل نبود
+  MONTH_NONE: 0.2,                     // نداشت
 
-  // فصل (وقتی source فصل دارد)
+  // فصل (وقتی source فصل دارد، نه ماه)
   SEASON_SAME: 3.0,
-  SEASON_MONTHS_IN_SEASON: 2.5,
-  SEASON_NEXT: 2.0,
-  SEASON_NONE: 0.2,
+  SEASON_MONTHS_IN_SEASON: 2.5,       // ماه‌های همان فصل
+  SEASON_NEXT: 2.0,                   // فصل بعد
+  SEASON_NONE: 0.2,                   // نداشت
 
   // نوع سفر
   TRAVEL_TYPE_MATCH: 1.5,
   TRAVEL_TYPE_MISMATCH: 0.8,
-  TRAVEL_TYPE_NONE: 1.0,
 
   // برچسب کلاس تور
   TOUR_CLASS_MATCH: 2.0,
   TOUR_CLASS_MISMATCH: 0.75,
-  TOUR_CLASS_NONE: 1.0,
+  TOUR_CLASS_NONE: 1.0,        // نداشت
 
   // ستاره هتل
-  HOTEL_STAR_SAME: 1.8,
-  HOTEL_STAR_DIFF_1: 1.1,
-  HOTEL_STAR_DIFF_2: 0.75,
-  HOTEL_STAR_NONE: 1.0,
+  HOTEL_STAR_SAME: 1.8,        // هم‌رده
+  HOTEL_STAR_DIFF_1: 1.1,      // یک رده بالا/پایین
+  HOTEL_STAR_DIFF_2: 0.75,     // ۲ رده بالا/پایین
+  HOTEL_STAR_NONE: 1.0,        // نداشت
 
   // مبدا
   ORIGIN_MATCH: 3.0,
   ORIGIN_MISMATCH: 0.5,
-  ORIGIN_NONE: 1.0,
+  ORIGIN_NONE: 1.0,            // نداشت
 
-  // جریمه متقاطع (Cross-Penalty)
-  CROSS_PENALTY_ORIGIN_TO_TIME: 0.4,      // صفحه مبدادار → تارگت زمان‌دار
-  CROSS_PENALTY_ORIGIN_TO_HOTEL: 0.4,     // صفحه مبدادار → تارگت هتل‌دار
-  CROSS_PENALTY_TIME_TO_ORIGIN: 0.7,      // صفحه زمان‌دار → تارگت مبدادار
-  CROSS_PENALTY_TIME_TO_HOTEL: 0.4,       // صفحه زمان‌دار → تارگت هتل‌دار
-  CROSS_PENALTY_HOTEL_TO_TIME: 0.4,       // صفحه هتل‌دار → تارگت زمان‌دار
-  CROSS_PENALTY_HOTEL_TO_ORIGIN: 0.4,     // صفحه هتل‌دار → تارگت مبدادار
-
-  // بونوس‌ها
+  // بونوس‌ها (برای UI - جدا از امتیاز اصلی)
   ORIGIN_BONUS: 10,
   DESTINATION_BONUS: 5,
-
-  // صفحات مادر
-  MOTHER_PAGE_CITY: 10000,
-  MOTHER_PAGE_COUNTRY: 5000,
 } as const;
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -311,13 +295,11 @@ function parseCategories(raw: unknown): Record<string, unknown> {
 // توابع محاسبه ضرایب جداگانه
 // ══════════════════════════════════════════════════════════════════════════════
 
-/** جهت منطقه */
+/** جهت منطقه - مشابه: 1.5 | غیرمشابه: 0.8 */
 function calcRegionScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag: string | null } {
-  if (!src.regionDirection) {
-    return { coef: COEFFICIENTS.REGION_NONE, tag: null };
-  }
-  if (!tgt.regionDirection) {
-    return { coef: COEFFICIENTS.REGION_NONE, tag: null }; // نداشت = خنثی
+  // اگر source یا target جهت منطقه ندارد، ضریب خنثی
+  if (!src.regionDirection || !tgt.regionDirection) {
+    return { coef: 1.0, tag: null };
   }
   if (src.regionDirection === tgt.regionDirection) {
     return { coef: COEFFICIENTS.REGION_MATCH, tag: 'جهت_در_منطقه' };
@@ -325,53 +307,52 @@ function calcRegionScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag:
   return { coef: COEFFICIENTS.REGION_MISMATCH, tag: null };
 }
 
-/** دسته‌های کلی */
-function calcGeneralScore(tgt: ParsedPage): { coef: number; tag: string | null } {
-  if (tgt.isGeneral) {
-    return { coef: COEFFICIENTS.GENERAL_BONUS, tag: 'دسته_های_کلی' };
+/** دسته‌های کلی - تطابق کلمات: 1.5 */
+function calcGeneralScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag: string | null } {
+  // فقط وقتی تطابق کلمات کلی بین source و target باشد
+  if (src.generalKeywords.length === 0) {
+    return { coef: 1.0, tag: null };
+  }
+  // بررسی تطابق کلمات کلی
+  const hasMatch = src.generalKeywords.some(k => tgt.generalKeywords.includes(k));
+  if (hasMatch) {
+    return { coef: COEFFICIENTS.GENERAL_MATCH, tag: 'دسته_های_کلی' };
   }
   return { coef: 1.0, tag: null };
 }
 
-/** مقصد */
+/** مقصد - مشابه: 2 | غیرمشابه: 0.7 */
 function calcDestinationScore(
   src: ParsedPage,
   tgt: ParsedPage
-): { coef: number; tag: string | null; bonus: number; isExactDest: boolean } {
+): { coef: number; tag: string | null; bonus: number } {
   const srcHasDest = !!(src.city || src.country);
   const tgtHasDest = !!(tgt.city || tgt.country);
 
-  if (!srcHasDest) {
-    return { coef: COEFFICIENTS.DESTINATION_NONE, tag: null, bonus: 0, isExactDest: false };
+  // اگر source یا target مقصد ندارد، ضریب خنثی
+  if (!srcHasDest || !tgtHasDest) {
+    return { coef: 1.0, tag: null, bonus: 0 };
   }
 
-  if (!tgtHasDest) {
-    return { coef: COEFFICIENTS.DESTINATION_NONE, tag: null, bonus: 0, isExactDest: false }; // نداشت = خنثی
-  }
-
-  // هم شهر
+  // مقصد مشابه = شهر یکسان یا کشور یکسان
   if (src.city && tgt.city && src.city === tgt.city) {
     return {
-      coef: COEFFICIENTS.DESTINATION_SAME_CITY,
+      coef: COEFFICIENTS.DESTINATION_MATCH,
       tag: 'شهر_یا_جزیره_مقصد',
       bonus: COEFFICIENTS.DESTINATION_BONUS,
-      isExactDest: true,
     };
   }
 
-  // هم کشور
   if (src.country && tgt.country && src.country === tgt.country) {
-    const isExact = !src.city && !tgt.city;
     return {
-      coef: COEFFICIENTS.DESTINATION_SAME_COUNTRY,
-      tag: 'هم_کشور',
-      bonus: 0,
-      isExactDest: isExact,
+      coef: COEFFICIENTS.DESTINATION_MATCH,
+      tag: 'کشور_مقصد',
+      bonus: COEFFICIENTS.DESTINATION_BONUS,
     };
   }
 
   // غیرمشابه
-  return { coef: COEFFICIENTS.DESTINATION_MISMATCH, tag: null, bonus: 0, isExactDest: false };
+  return { coef: COEFFICIENTS.DESTINATION_MISMATCH, tag: null, bonus: 0 };
 }
 
 /** حمل‌ونقل */
@@ -530,16 +511,14 @@ function calcTimeScore(
   return { coef: 1.0, tag: null, shouldFilter: false };
 }
 
-/** نوع سفر */
+/** نوع سفر - مشابه: 1.5 | غیرمشابه: 0.8 */
 function calcTravelTypeScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag: string | null } {
   const srcType = src.travelType || src.tourType;
   const tgtType = tgt.travelType || tgt.tourType;
 
-  if (!srcType) {
-    return { coef: COEFFICIENTS.TRAVEL_TYPE_NONE, tag: null };
-  }
-  if (!tgtType) {
-    return { coef: COEFFICIENTS.TRAVEL_TYPE_NONE, tag: null }; // نداشت = خنثی
+  // اگر source یا target نوع سفر ندارد، ضریب خنثی
+  if (!srcType || !tgtType) {
+    return { coef: 1.0, tag: null };
   }
   if (srcType === tgtType) {
     return { coef: COEFFICIENTS.TRAVEL_TYPE_MATCH, tag: src.travelType ? 'نوع_سفر' : 'نوع_تور' };
@@ -594,62 +573,6 @@ function calcOriginScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag:
   return { coef: COEFFICIENTS.ORIGIN_MISMATCH, tag: null, bonus: 0 };
 }
 
-/**
- * جریمه متقاطع (Cross-Penalty)
- * صفحات مبدادار/زمان‌دار/هتل‌دار نباید لینک‌های نامرتبط داشته باشند
- */
-function calcCrossPenalty(src: ParsedPage, tgt: ParsedPage): { coef: number; tag: string | null } {
-  let penalty = 1.0;
-
-  // صفحه مبدادار
-  if (src.hasOrigin) {
-    if (tgt.hasMonth || tgt.hasSeason) {
-      penalty *= COEFFICIENTS.CROSS_PENALTY_ORIGIN_TO_TIME;
-    }
-    if (tgt.hasHotel) {
-      penalty *= COEFFICIENTS.CROSS_PENALTY_ORIGIN_TO_HOTEL;
-    }
-  }
-
-  // صفحه زمان‌دار
-  if (src.hasMonth || src.hasSeason) {
-    if (tgt.hasOrigin) {
-      penalty *= COEFFICIENTS.CROSS_PENALTY_TIME_TO_ORIGIN;
-    }
-    if (tgt.hasHotel) {
-      penalty *= COEFFICIENTS.CROSS_PENALTY_TIME_TO_HOTEL;
-    }
-  }
-
-  // صفحه هتل‌دار
-  if (src.hasHotel) {
-    if (tgt.hasMonth || tgt.hasSeason) {
-      penalty *= COEFFICIENTS.CROSS_PENALTY_HOTEL_TO_TIME;
-    }
-    if (tgt.hasOrigin) {
-      penalty *= COEFFICIENTS.CROSS_PENALTY_HOTEL_TO_ORIGIN;
-    }
-  }
-
-  if (penalty < 1.0) {
-    return { coef: penalty, tag: 'جریمه_متقاطع' };
-  }
-  return { coef: 1.0, tag: null };
-}
-
-/** صفحات مادر (God Multiplier) */
-function calcMotherPageBonus(src: ParsedPage, tgt: ParsedPage): { coef: number; tag: string | null } {
-  const tgtTitleClean = tgt.title.trim();
-
-  if (src.city && tgtTitleClean === `تور ${src.city}`) {
-    return { coef: COEFFICIENTS.MOTHER_PAGE_CITY, tag: 'صفحه_مادر_شهر' };
-  }
-  if (src.country && tgtTitleClean === `تور ${src.country}`) {
-    return { coef: COEFFICIENTS.MOTHER_PAGE_COUNTRY, tag: 'صفحه_مادر_کشور' };
-  }
-  return { coef: 1.0, tag: null };
-}
-
 // ══════════════════════════════════════════════════════════════════════════════
 // الگوریتم امتیازدهی اصلی
 // ══════════════════════════════════════════════════════════════════════════════
@@ -677,8 +600,8 @@ function calculateScore(
   score *= region.coef;
   if (region.tag) matchedTags.push(region.tag);
 
-  // ۲. دسته‌های کلی
-  const general = calcGeneralScore(tgt);
+  // ۲. دسته‌های کلی (تطابق کلمات کلی بین source و target)
+  const general = calcGeneralScore(src, tgt);
   score *= general.coef;
   if (general.tag) matchedTags.push(general.tag);
 
@@ -719,16 +642,6 @@ function calculateScore(
   score *= origin.coef;
   if (origin.tag) matchedTags.push(origin.tag);
   originBonus = origin.bonus;
-
-  // ۱۰. جریمه متقاطع
-  const crossPenalty = calcCrossPenalty(src, tgt);
-  score *= crossPenalty.coef;
-  if (crossPenalty.tag) matchedTags.push(crossPenalty.tag);
-
-  // ۱۱. صفحات مادر (در انتها اعمال می‌شود)
-  const motherPage = calcMotherPageBonus(src, tgt);
-  score *= motherPage.coef;
-  if (motherPage.tag) matchedTags.push(motherPage.tag);
 
   return {
     score,
