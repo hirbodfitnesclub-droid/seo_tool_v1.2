@@ -51,6 +51,8 @@ interface ParsedPage {
   hasSeason: boolean;
   hasHotel: boolean;
   hasTime: boolean;
+  hasNorouz: boolean;
+  isMotherPage: boolean;
   generalKeywords: string[];
   isGeneral: boolean;
 }
@@ -135,8 +137,14 @@ const COEFFICIENTS = {
   // ماه (وقتی source ماه دارد)
   MONTH_SAME: 3.0,
   MONTH_SAME_SEASON: 2.0,
+  // فقط ماه آخر فصل اجازه دارد به فصل بعدی پل بزند.
+  // ماه‌های وسط فصل هرگز نباید به فصل بعدی لینک قوی بدهند → LETHAL_PENALTY اعمال می‌شود.
   MONTH_NEXT_SEASON_LAST_MONTH: 1.8,
-  MONTH_NEXT_SEASON_NOT_LAST: 0.8,
+
+  // نوروز - استثنای بیزینسی (قوی‌تر از MONTH_SAME)
+  // اگر سورس "نوروز" داشت، اولویت مطلق با تارگت‌های نوروزی/فروردین/بهار است
+  NOROUZ_TO_NOROUZ: 5.0,
+  NOROUZ_TO_FARVARDIN_OR_BAHAR: 4.0,
 
   // فصل (وقتی source فصل دارد، نه ماه)
   SEASON_SAME: 3.0,
@@ -183,6 +191,14 @@ const COEFFICIENTS = {
     HOTEL_ONLY: {
       TO_TIME: 0.4,
       TO_ORIGIN: 0.4,
+    },
+    // صفحات مادر (تور کیش، تور ترکیه) نباید به صفحات هویت‌دار لینک قوی بدهند.
+    // فلسفه سئو: صفحه مادر باید به صفحات کلی/خنثی لینک کند تا اعتبار را پخش کند،
+    // نه به صفحات تخصصی زمان‌دار/هتل‌دار که فرزندان او هستند.
+    MOTHER_PAGE: {
+      TO_TIME: 0.2,
+      TO_HOTEL: 0.2,
+      TO_ORIGIN: 0.75,
     },
   },
 
@@ -331,15 +347,26 @@ function parsePage(page: PageInfo, cat: Record<string, unknown>): ParsedPage {
   const season = extractSeason(title);
   const seasonIdx = season ? SEASONS_ORDER.indexOf(season) : -1;
   const generalKeywords = extractGeneralKeywords(title);
-  
+
   const hasMonth = monthIdx !== -1;
   const hasSeason = seasonIdx !== -1 && !hasMonth;
   const hasTime = hasMonth || hasSeason;
+  const hasNorouz = title.includes('نوروز') || title.includes('نوروزی');
+
+  const city = (cat['شهر_یا_جزیره_مقصد'] as string)?.trim() || null;
+  const country = (cat['کشور_مقصد'] as string)?.trim() || null;
+
+  // صفحه مادر: عنوان دقیقاً «تور [شهر]» یا «تور [کشور]» باشد.
+  // این صفحات هاب اصلی مقصد هستند و در ماتریس جریمه متقاطع رفتار خاصی دارند.
+  const titleClean = title.trim();
+  const isMotherPage =
+    (!!city && titleClean === `تور ${city}`) ||
+    (!!country && titleClean === `تور ${country}`);
 
   return {
     title,
-    city: (cat['شهر_یا_جزیره_مقصد'] as string)?.trim() || null,
-    country: (cat['کشور_مقصد'] as string)?.trim() || null,
+    city,
+    country,
     origin: (cat['شهر_یا_استان_مبدا'] as string)?.trim() || null,
     month,
     monthIdx,
@@ -356,6 +383,8 @@ function parsePage(page: PageInfo, cat: Record<string, unknown>): ParsedPage {
     hasSeason,
     hasTime,
     hasHotel: hasHotelInTitle(title, cat['نام_دقیق_هتل']),
+    hasNorouz,
+    isMotherPage,
     generalKeywords,
     isGeneral: generalKeywords.length > 0,
   };
@@ -377,13 +406,29 @@ function parseCategories(raw: unknown): Record<string, unknown> {
 // تشخیص هویت صفحه (برای ماتریس جریمه متقاطع)
 // ══════════════════════════════════════════════════════════════════════════════
 
-type PageIdentity = 'TIME_ONLY' | 'ORIGIN_ONLY' | 'HOTEL_ONLY' | 'MULTI' | 'NONE';
+type PageIdentity =
+  | 'MOTHER_PAGE'
+  | 'TIME_ONLY'
+  | 'ORIGIN_ONLY'
+  | 'HOTEL_ONLY'
+  | 'MULTI'
+  | 'NONE';
 
+/**
+ * تشخیص هویت صفحه برای ماتریس جریمه متقاطع.
+ *
+ * اولویت تشخیص:
+ *   ۱. MOTHER_PAGE - صفحه هاب مقصد (مثل «تور کیش» یا «تور ترکیه»). این هویت
+ *      حتی وقتی صفحه زمان/مبدا/هتل ندارد هم باید شناسایی شود تا در گیت‌وی
+ *      جریمه گیر کند و به فرزندان تخصصی‌اش لینک قوی ندهد.
+ *   ۲. MULTI - بیش از یک ویژگی هویتی دارد
+ *   ۳. تک‌هویتی‌ها (TIME_ONLY / ORIGIN_ONLY / HOTEL_ONLY)
+ *   ۴. NONE - هیچ‌کدام (صفحات کلی بدون هویت خاص)
+ */
 function getPageIdentity(page: ParsedPage): PageIdentity {
-  const hasTime = page.hasTime;
-  const hasOrigin = page.hasOrigin;
-  const hasHotel = page.hasHotel;
+  if (page.isMotherPage) return 'MOTHER_PAGE';
 
+  const { hasTime, hasOrigin, hasHotel } = page;
   const count = [hasTime, hasOrigin, hasHotel].filter(Boolean).length;
 
   if (count === 0) return 'NONE';
@@ -503,10 +548,45 @@ function checkEvergreenRescue(src: ParsedPage, tgt: ParsedPage): boolean {
 }
 
 /**
+ * قانون استثنایی نوروز (Norouz Override)
+ *
+ * اگر سورس در عنوانش «نوروز» داشت، اولویت مطلق با تارگت‌های نوروزی است.
+ * این قانون قبل از سایر منطق‌های زمان اجرا می‌شود تا لینک‌سازی اجباری
+ * و قدرتمند برای فصل پرفروش نوروز تضمین شود.
+ *
+ * بازگشت null یعنی این قانون اعمال نشده و باید منطق عادی اجرا شود.
+ */
+function applyNorouzOverride(
+  src: ParsedPage,
+  tgt: ParsedPage
+): { coef: number; tag: string | null } | null {
+  if (!src.hasNorouz) return null;
+
+  // تارگت هم نوروز دارد → بالاترین اولویت
+  if (tgt.hasNorouz) {
+    return { coef: COEFFICIENTS.NOROUZ_TO_NOROUZ, tag: 'ماه_تقویمی_برگزاری' };
+  }
+
+  // تارگت ماه فروردین یا فصل بهار دارد → اولویت قوی
+  const isFarvardin = tgt.hasMonth && tgt.month === 'فروردین';
+  const isBahar = tgt.hasSeason && tgt.season === 'بهار';
+  if (isFarvardin || isBahar) {
+    return {
+      coef: COEFFICIENTS.NOROUZ_TO_FARVARDIN_OR_BAHAR,
+      tag: isFarvardin ? 'ماه_تقویمی_برگزاری' : 'فصل_برگزاری',
+    };
+  }
+
+  return null;
+}
+
+/**
  * زمان (ماه/فصل) - با ریاضیات چرخشی
- * 
+ *
  * این تابع منطق کامل زمان را پیاده‌سازی می‌کند:
+ * - قانون استثنایی نوروز در ابتدا اعمال می‌شود
  * - از ریاضیات چرخشی (Modulo) برای جلوگیری از تله تقویم استفاده می‌کند
+ * - ماه‌های قبلی همان فصل و فصل بعدی غیر-آخر-فصل با LETHAL_PENALTY دفن می‌شوند
  * - منطق نجات تورهای همیشگی (Evergreen Rescue) داخل همین تابع است
  * - نامتقارنی زمان (سورس بدون زمان، تارگت با زمان) را مدیریت می‌کند
  */
@@ -515,19 +595,23 @@ function calcTimeScore(
   tgt: ParsedPage,
   currentMonthIdx: number
 ): { coef: number; tag: string | null } {
+  // قانون استثنایی نوروز (قبل از همه چیز)
+  const norouzResult = applyNorouzOverride(src, tgt);
+  if (norouzResult) return norouzResult;
+
   // ─────────────────────────────────────────────────────────────
   // حالت ۱: سورس ماه دارد
   // ─────────────────────────────────────────────────────────────
   if (src.hasMonth) {
     const srcMonthIdx = src.monthIdx;
     const srcSeasonIdx = getMonthSeasonIdx(srcMonthIdx);
+    const srcIsLastMonth = isLastMonthOfSeason(srcMonthIdx);
 
     // تارگت ماه دارد
     if (tgt.hasMonth) {
       const tgtMonthIdx = tgt.monthIdx;
-      const tgtSeasonIdx = getMonthSeasonIdx(tgtMonthIdx);
 
-      // جریمه کشنده: ماه‌های گذشته (با ریاضیات چرخشی)
+      // جریمه کشنده: ماه‌های گذشته (تقویم چرخشی)
       if (isMonthInPast(tgtMonthIdx, currentMonthIdx)) {
         return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
       }
@@ -537,20 +621,18 @@ function calcTimeScore(
         return { coef: COEFFICIENTS.MONTH_SAME, tag: 'ماه_تقویمی_برگزاری' };
       }
 
-      // همان فصل (ماه‌های بعد از سورس)
+      // همان فصل و بعد از سورس (مثلاً سورس فروردین، تارگت اردیبهشت/خرداد)
+      // ماه‌های قبلی همان فصل (سورس خرداد، تارگت اردیبهشت) دفن می‌شوند
       if (isInSameSeasonAfter(srcMonthIdx, tgtMonthIdx)) {
         return { coef: COEFFICIENTS.MONTH_SAME_SEASON, tag: 'فصل_برگزاری' };
       }
 
-      // فصل بعدی
-      if (isInNextSeason(srcMonthIdx, tgtMonthIdx)) {
-        if (isLastMonthOfSeason(srcMonthIdx)) {
-          return { coef: COEFFICIENTS.MONTH_NEXT_SEASON_LAST_MONTH, tag: null };
-        }
-        return { coef: COEFFICIENTS.MONTH_NEXT_SEASON_NOT_LAST, tag: null };
+      // فصل بعدی - فقط اگر سورس آخرین ماه فصل باشد مجاز است
+      if (srcIsLastMonth && isInNextSeason(srcMonthIdx, tgtMonthIdx)) {
+        return { coef: COEFFICIENTS.MONTH_NEXT_SEASON_LAST_MONTH, tag: null };
       }
 
-      // سایر ماه‌ها - جریمه کشنده
+      // سایر حالات (شامل ماه‌های قبلی همان فصل و فصل‌های نامرتبط) - جریمه کشنده
       return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
     }
 
@@ -558,18 +640,15 @@ function calcTimeScore(
     if (tgt.hasSeason) {
       const tgtSeasonIdx = tgt.seasonIdx;
 
-      // همان فصل
+      // همان فصل (سورس فروردین → تارگت بهار)
       if (srcSeasonIdx === tgtSeasonIdx) {
         return { coef: COEFFICIENTS.MONTH_SAME_SEASON, tag: 'فصل_برگزاری' };
       }
 
-      // فصل بعدی
+      // فصل بعدی - فقط اگر سورس آخرین ماه فصل باشد
       const nextSeasonIdx = (srcSeasonIdx + 1) % 4;
-      if (tgtSeasonIdx === nextSeasonIdx) {
-        if (isLastMonthOfSeason(srcMonthIdx)) {
-          return { coef: COEFFICIENTS.MONTH_NEXT_SEASON_LAST_MONTH, tag: null };
-        }
-        return { coef: COEFFICIENTS.MONTH_NEXT_SEASON_NOT_LAST, tag: null };
+      if (srcIsLastMonth && tgtSeasonIdx === nextSeasonIdx) {
+        return { coef: COEFFICIENTS.MONTH_NEXT_SEASON_LAST_MONTH, tag: null };
       }
 
       // فصل‌های دیگر - جریمه کشنده
@@ -580,8 +659,7 @@ function calcTimeScore(
     if (checkEvergreenRescue(src, tgt)) {
       return { coef: COEFFICIENTS.EVERGREEN_RESCUE, tag: null };
     }
-    
-    // بدون نجات - جریمه کشنده
+
     return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
   }
 
@@ -596,7 +674,7 @@ function calcTimeScore(
       const tgtMonthIdx = tgt.monthIdx;
       const tgtSeasonIdx = getMonthSeasonIdx(tgtMonthIdx);
 
-      // جریمه کشنده: ماه‌های گذشته (با ریاضیات چرخشی)
+      // جریمه کشنده: ماه‌های گذشته
       if (isMonthInPast(tgtMonthIdx, currentMonthIdx)) {
         return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
       }
@@ -606,13 +684,13 @@ function calcTimeScore(
         return { coef: COEFFICIENTS.SEASON_MONTHS_IN_SEASON, tag: 'فصل_برگزاری' };
       }
 
-      // فصل بعدی
+      // فصل بعدی (سورس فصل است نه ماه، پس مفهوم «ماه آخر فصل» معنا ندارد
+      // و سورس به‌طور کلی نماینده تمام ماه‌های آن فصل است؛ پل به فصل بعدی مجاز است)
       const nextSeasonIdx = (srcSeasonIdx + 1) % 4;
       if (tgtSeasonIdx === nextSeasonIdx) {
         return { coef: COEFFICIENTS.SEASON_NEXT, tag: null };
       }
 
-      // سایر ماه‌ها - جریمه کشنده
       return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
     }
 
@@ -620,18 +698,15 @@ function calcTimeScore(
     if (tgt.hasSeason) {
       const tgtSeasonIdx = tgt.seasonIdx;
 
-      // همان فصل
       if (srcSeasonIdx === tgtSeasonIdx) {
         return { coef: COEFFICIENTS.SEASON_SAME, tag: 'فصل_برگزاری' };
       }
 
-      // فصل بعدی
       const nextSeasonIdx = (srcSeasonIdx + 1) % 4;
       if (tgtSeasonIdx === nextSeasonIdx) {
         return { coef: COEFFICIENTS.SEASON_NEXT, tag: null };
       }
 
-      // فصل‌های دیگر - جریمه کشنده
       return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
     }
 
@@ -639,8 +714,7 @@ function calcTimeScore(
     if (checkEvergreenRescue(src, tgt)) {
       return { coef: COEFFICIENTS.EVERGREEN_RESCUE, tag: null };
     }
-    
-    // بدون نجات - جریمه کشنده
+
     return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
   }
 
@@ -648,9 +722,7 @@ function calcTimeScore(
   // حالت ۳: سورس زمان ندارد
   // ─────────────────────────────────────────────────────────────
 
-  // اگر تارگت زمان دارد - جریمه نامتقارنی (نه خنثی!)
-  // تور بدون زمان نباید به تورهای زمان‌دار لینک‌های قوی بدهد.
-  // اما اگر ماه تارگت گذشته باشد، صفحه مرده است و باید کاملاً دفن شود.
+  // تارگت ماه دارد - اگر گذشته است دفن، در غیر این صورت جریمه نامتقارنی
   if (tgt.hasMonth) {
     if (isMonthInPast(tgt.monthIdx, currentMonthIdx)) {
       return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
@@ -736,7 +808,11 @@ function calcOriginScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag:
 
 /**
  * ماتریس جریمه متقاطع (Cross-Penalty Matrix)
- * فقط برای صفحات تک‌هویتی
+ *
+ * اعمال جریمه بر اساس هویت سورس:
+ *   - MOTHER_PAGE: قطعی به تارگت‌های زمان/هتل ضریب ۰.۲ و به مبدادار ۰.۷۵ می‌دهد
+ *   - تک‌هویتی‌ها: طبق ماتریس مربوطه
+ *   - MULTI / NONE: بدون جریمه (1.0)
  */
 function calcCrossPenalty(src: ParsedPage, tgt: ParsedPage): { coef: number } {
   const srcIdentity = getPageIdentity(src);
@@ -748,6 +824,18 @@ function calcCrossPenalty(src: ParsedPage, tgt: ParsedPage): { coef: number } {
   let penalty = 1.0;
 
   switch (srcIdentity) {
+    case 'MOTHER_PAGE':
+      if (tgt.hasTime) {
+        penalty *= COEFFICIENTS.CROSS_PENALTY.MOTHER_PAGE.TO_TIME;
+      }
+      if (tgt.hasHotel) {
+        penalty *= COEFFICIENTS.CROSS_PENALTY.MOTHER_PAGE.TO_HOTEL;
+      }
+      if (tgt.hasOrigin) {
+        penalty *= COEFFICIENTS.CROSS_PENALTY.MOTHER_PAGE.TO_ORIGIN;
+      }
+      break;
+
     case 'TIME_ONLY':
       if (tgt.hasOrigin) {
         penalty *= COEFFICIENTS.CROSS_PENALTY.TIME_ONLY.TO_ORIGIN;
