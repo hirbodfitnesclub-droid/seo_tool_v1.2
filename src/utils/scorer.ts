@@ -179,11 +179,31 @@ const COEFFICIENTS = {
   TIME_ASYMMETRY_PENALTY: 0.8,
 
   // ماتریس جریمه متقاطع (Cross-Penalty Matrix)
+  // فلسفه: ۳ دسته اصلی هویتی (زمان، مبدا، هتل) باید سیلوهای سئوی مستقل باشند.
+  // ضریب ۰.۲ تضمین می‌کند زامبی‌های نامربوط به قعر گراف دفن شوند و سیلوها به هم نشت نکنند.
   CROSS_PENALTY: {
     TIME_ONLY: {
-      TO_ORIGIN: 0.7,
-      TO_HOTEL: 0.4,
+      TO_ORIGIN: 0.2,
+      TO_HOTEL: 0.2,
     },
+    ORIGIN_ONLY: {
+      TO_TIME: 0.2,
+      TO_HOTEL: 0.2,
+    },
+    HOTEL_ONLY: {
+      TO_TIME: 0.2,
+      TO_ORIGIN: 0.2,
+    },
+    // صفحات مادر (تور کیش، تور ترکیه) نباید به هیچ صفحه تخصصی لینک قوی بدهند.
+    // علاوه بر زمان/هتل، صفحات با حمل‌ونقل خاص (مثل «تور کیش با پرواز ماهان») هم
+    // باید جریمه شوند، وگرنه از تله قسر در می‌روند و رتبه دوم را می‌گیرند.
+    MOTHER_PAGE: {
+      TO_TIME: 0.2,
+      TO_HOTEL: 0.2,
+      TO_TRANSPORT: 0.2,
+      TO_ORIGIN: 0.75,
+    },
+  },
     ORIGIN_ONLY: {
       TO_TIME: 0.4,
       TO_HOTEL: 0.4,
@@ -194,7 +214,7 @@ const COEFFICIENTS = {
     },
     // صفحات مادر (تور کیش، تور ترکیه) نباید به صفحات هویت‌دار لینک قوی بدهند.
     // فلسفه سئو: صفحه مادر باید به صفحات کلی/خنثی لینک کند تا اعتبار را پخش کند،
-    // نه به صفحات تخصصی زمان‌دار/هتل‌دار که فرزندان او هستند.
+    // نه به صفحات تخصصی زم��ن‌دار/هتل‌دار که فرزندان او هستند.
     MOTHER_PAGE: {
       TO_TIME: 0.2,
       TO_HOTEL: 0.2,
@@ -833,6 +853,11 @@ function calcCrossPenalty(src: ParsedPage, tgt: ParsedPage): { coef: number } {
       }
       if (tgt.hasOrigin) {
         penalty *= COEFFICIENTS.CROSS_PENALTY.MOTHER_PAGE.TO_ORIGIN;
+      }
+      // بستن حفره حمل‌ونقل: «تور کیش با پرواز ماهان» نباید زیر «تور کیش» رتبه دوم شود.
+      // اگر تارگت حمل‌ونقل خاص دارد ولی خودش مادر نیست و کلی هم نیست، جریمه سنگین.
+      if (tgt.transport && !tgt.isMotherPage && !tgt.isGeneral) {
+        penalty *= COEFFICIENTS.CROSS_PENALTY.MOTHER_PAGE.TO_TRANSPORT;
       }
       break;
 
