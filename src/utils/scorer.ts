@@ -66,8 +66,11 @@ const TRANSPORT_KEYWORDS = ['هوایی', 'قطار', 'اتوبوس', 'کشتی'
 // تعداد ماه‌ها در سال شمسی
 const MONTHS_IN_YEAR = 12;
 
-// پنجره زمانی معتبر (چند ماه آینده قابل قبول است)
-const VALID_FUTURE_WINDOW = 4;
+// پنجره زمانی معتبر در تقویم چرخشی ۱۲ ماهه
+// فاصله‌های ۰ تا ۸ → آینده (تا ۸ ماه جلوتر، شامل پیش‌فروش نوروز و تابستان)
+// فاصله‌های ۹ تا ۱۱ → گذشته (یعنی ۱ تا ۳ ماهِ قبل که تمام شده‌اند)
+// این عدد برای بیزینس گردشگری حیاتی است: کاربری در مهر باید تورهای فروردین (نوروز) را ببیند
+const VALID_FUTURE_WINDOW = 8;
 
 /**
  * محاسبه ماه شمسی فعلی بر اساس تاریخ میلادی
@@ -473,12 +476,30 @@ function calcTransportScore(src: ParsedPage, tgt: ParsedPage): { coef: number; t
 
 /**
  * بررسی شرط نجات تورهای همیشگی (Evergreen Rescue)
- * شرط: تارگت کلمات کلی دارد و مقصد دقیقاً یکسان است
+ *
+ * شرط: تارگت کلمات کلی (ارزان، لوکس، هوایی، ...) دارد و مقصد دقیقاً یکسان است.
+ * تعریف "مقصد دقیقاً یکسان" در دو حالت:
+ *   ۱. هر دو شهر دارند و شهرهایشان برابر است
+ *   ۲. هیچ‌کدام شهر ندارند ولی هر دو کشور دارند و کشورهایشان برابر است
+ *      (مثلاً «تور ترکیه» و «تور ارزان ترکیه» باید نجات پیدا کنند)
+ *
+ * اگر یکی شهر داشته باشد و دیگری نداشته باشد، نجات اتفاق نمی‌افتد چون
+ * گرانولاریتیِ مقصد متفاوت است و از نظر سئو نباید لینک قوی بدهیم.
  */
 function checkEvergreenRescue(src: ParsedPage, tgt: ParsedPage): boolean {
-  const hasGeneralKeywords = tgt.isGeneral;
-  const sameCityDestination = src.city && tgt.city && src.city === tgt.city;
-  return hasGeneralKeywords && sameCityDestination;
+  if (!tgt.isGeneral) return false;
+
+  const isExactCityMatch =
+    !!src.city && !!tgt.city && src.city === tgt.city;
+
+  const isExactCountryMatch =
+    !src.city &&
+    !tgt.city &&
+    !!src.country &&
+    !!tgt.country &&
+    src.country === tgt.country;
+
+  return isExactCityMatch || isExactCountryMatch;
 }
 
 /**
@@ -626,10 +647,18 @@ function calcTimeScore(
   // ─────────────────────────────────────────────────────────────
   // حالت ۳: سورس زمان ندارد
   // ─────────────────────────────────────────────────────────────
-  
+
   // اگر تارگت زمان دارد - جریمه نامتقارنی (نه خنثی!)
-  // تور بدون زمان نباید به تورهای زمان‌دار لینک‌های قوی بدهد
-  if (tgt.hasTime) {
+  // تور بدون زمان نباید به تورهای زمان‌دار لینک‌های قوی بدهد.
+  // اما اگر ماه تارگت گذشته باشد، صفحه مرده است و باید کاملاً دفن شود.
+  if (tgt.hasMonth) {
+    if (isMonthInPast(tgt.monthIdx, currentMonthIdx)) {
+      return { coef: COEFFICIENTS.LETHAL_PENALTY, tag: null };
+    }
+    return { coef: COEFFICIENTS.TIME_ASYMMETRY_PENALTY, tag: null };
+  }
+
+  if (tgt.hasSeason) {
     return { coef: COEFFICIENTS.TIME_ASYMMETRY_PENALTY, tag: null };
   }
 
@@ -856,7 +885,7 @@ function calculateScore(
 
 // ══════════════════════════════════════════════════════════════════════════════
 // نرمال‌سازی امتیاز - فرمول لگاریتمی (فقط برای نمایش UI)
-// ══════════════════════════════════════════════════════════════════════════════
+// ═════════════════════════════════════���════════════════════════════════════════
 
 /**
  * نرمال‌سازی لگاریتمی
