@@ -267,7 +267,55 @@ throw "تعداد تلاش‌ها به حداکثر رسید"
 
 ---
 
-## ۷. Web Worker
+## ۷. Adaptive Scoring Pipeline (R13 — معماری تطبیقی)
+
+### مسئله‌ای که این بخش حل می‌کند
+بعد از R12 ثابت شد که برای پروژه‌های بزرگ (هزاران صفحه) Worker + IPC بهینه گلوگاه را برمی‌دارد. اما برای پروژه‌های کوچک و متوسط (مثلاً ۷۰۰ صفحه)، **هزینه راه‌اندازی Worker** (کامپایل ماژول در dev، structured-clone، transfer pages به ورکر، transfer نتیجه به main، ساخت Map از آرایه، تراکنش Dexie) چند ثانیه می‌شود — در حالی که اجرای همان منطق روی Main Thread فقط حدود ۱ ثانیه طول می‌کشد.
+
+### تصمیم معماری
+سیستم دو مسیر مجزا دارد و در runtime بر اساس **تعداد صفحات پروژه** یکی را انتخاب می‌کند.
+
+```
+                    computeAndStoreCandidates(projectId, pages, ...)
+                                       │
+                          pages.length <= THRESHOLD ?
+                          ┌────────────┴────────────┐
+                          ▼ YES                     ▼ NO
+                  ┌──────────────────┐    ┌──────────────────┐
+                  │   Fast-Track     │    │   Heavy-Track    │
+                  │  (Main Thread)   │    │  (Web Worker)    │
+                  └──────────────────┘    └──────────────────┘
+```
+
+### آستانه (Threshold)
+- ثابت `SCORING_WORKER_THRESHOLD = 1000` در ابتدای `src/utils/candidateStorage.ts`.
+- قاعده: `pages.length <= 1000` → Fast-Track، در غیر این صورت Heavy-Track.
+
+### مسیر Fast-Track (`pages.length ≤ 1000`)
+- **بدون Worker.** هیچ `new ScoringWorker()` فراخوانی نمی‌شود.
+- مستقیماً از `core/scoring/idfCalculator.ts::computeIDFMap` و `core/scoring/scorer.ts::computeAllCandidates` روی Main Thread استفاده می‌شود (synchronous).
+- چون این توابع Pure هستند و در R4 از وابستگی DOM/Dexie جدا شده‌اند، روی Main Thread بدون مشکل قابل اجرا هستند.
+- نتیجه مستقیماً (بدون structured-clone، بدون postMessage، بدون رفت‌و‌برگشت Map↔Array) در همان `db.transaction` واحد ذخیره می‌شود.
+- مزیت: حذف کامل سربار IPC (تخمین: کاهش از چند ثانیه به زیر ۱ ثانیه).
+- ریسک قابل قبول: chunk کوتاه CPU روی Main Thread (حدود ۵۰۰ms تا ۱s برای ۷۰۰ صفحه). UI ممکن است یک لحظه micro-jank داشته باشد، اما این بسیار بهتر از انتظار چند ثانیه‌ای است.
+
+### مسیر Heavy-Track (`pages.length > 1000`)
+- دقیقاً همان جریان R12: `computeAllInWorker` از `services/scoring/scoringService.ts` صدا زده می‌شود.
+- یک Worker اسپاون می‌شود، یک پیام `COMPUTE_ALL` می‌رود، یک پیام `DONE_ALL` برمی‌گردد، Worker terminate می‌شود.
+- نتیجه در همان `db.transaction` واحد (idfCache + candidates) ذخیره می‌شود.
+- مزیت: UI در پروژه‌های بزرگ freeze نمی‌شود.
+
+### نکات مشترک هر دو مسیر
+- خروجی نهایی Dexie (`idfCache` و `candidates`) **بایت-به-بایت یکسان** است؛ فقط مسیر اجرا فرق دارد.
+- ساخت `pagesWithId` (parse کردن `categories` در صورت string بودن) یک‌بار قبل از شاخه if/else انجام می‌شود.
+- تراکنش واحد Dexie و حذف فیلد `categories` از candidate (R12) در هر دو مسیر دست‌نخورده باقی می‌ماند.
+
+### مرز انتخاب آستانه
+- ۱۰۰۰ یک نقطه محافظه‌کارانه است. در ماشین‌های متوسط، Main Thread می‌تواند تا ~۲۰۰۰ صفحه را در زیر ۲ ثانیه پردازش کند بدون اینکه UI به‌طور محسوس freeze شود. اگر تست‌های واقعی نیاز به تنظیم نشان داد، فقط مقدار `SCORING_WORKER_THRESHOLD` تغییر می‌کند — هیچ تغییر معماری دیگری لازم نیست.
+
+---
+
+## ۸. Web Worker (Heavy-Track)
 
 ### فایل `src/workers/scoringWorker.ts`
 ```ts
@@ -300,7 +348,7 @@ export async function computeCandidatesInWorker(pages) {
 
 ---
 
-## ۸. نکات امنیتی (بدون تغییر)
+## ۹. نکات امنیتی (بدون تغییر)
 
 - کلید Gemini API فقط در `localStorage` با کلید `LINKMESH_API_KEY`
 - در حال حاضر یک proxy روی `/api/gemini` (server.ts) وجود دارد که کلید را از env می‌خواند — این پابرجاست
