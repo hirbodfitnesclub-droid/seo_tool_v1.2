@@ -1,6 +1,8 @@
-# ARCHITECTURE.md — لنگرگاه سیستمی (نسخه ریفکتور لایه‌ای)
+# ARCHITECTURE.md — لنگرگاه سیستمی (نسخه ریفکتور لایه‌ای + Adaptive Scoring)
 
 > این سند معماری **هدف نهایی** فاز ۱.۵ ریفکتور را تعریف می‌کند. اسکیمای دیتابیس و الگوریتم scorer دست‌نخورده می‌ماند؛ ساختار فایل‌ها و جریان وابستگی‌ها بازسازی می‌شود.
+>
+> **به‌روزرسانی R13:** بخش جدید «۷.۵ — Adaptive Scoring Pipeline» اضافه شد تا گلوگاه پرفورمنس در پروژه‌های کوچک/متوسط (≤ ۱۰۰۰ صفحه) از طریق رویکرد تطبیقی برطرف شود.
 
 ---
 
@@ -44,7 +46,7 @@
 
 ### قواعد جریان وابستگی (الزامی)
 - لایه بالاتر فقط از لایه پایین‌تر import می‌کند، **هرگز بالعکس**.
-- Layer 4 (Core) هیچ import از Dexie، React، یا `window` ندارد → قابل اجرا در Web Worker.
+- Layer 4 (Core) هیچ import از Dexie، React، یا `window` ندارد → قابل اجرا در Web Worker و همچنین قابل فراخوانی sync از Main Thread.
 - Layer 1 (UI) **هرگز** `import { db }` نمی‌کند.
 
 ---
@@ -161,6 +163,12 @@ utils/titleSimilarity.ts
 ```
 این پوشه `/utils` ریشه به نظر از یک کپی قدیمی به‌جا مانده و در آخرین تسک حذف می‌شود.
 
+### نقاط ویرایش اختصاصی R13
+
+- `src/services/scoring/scoringService.ts` → **[ویرایش]** افزودن تابع `computeAllAdaptive(pages)` و ثابت `SCORING_FAST_TRACK_THRESHOLD = 1000`. توابع موجود (`computeAllInWorker`، `computeCandidatesInWorker`، `computeIDFInWorker`) **یک کاراکتر هم تغییر نمی‌کنند**.
+- `src/utils/candidateStorage.ts` → **[ویرایش جزئی]** فقط یک‌خط: فراخوانی `computeAllAdaptive` به‌جای `computeAllInWorker`. منطق Dexie و `db.transaction` دست‌نخورده باقی می‌ماند.
+- **هیچ فایل جدیدی ساخته نمی‌شود.** هیچ کتابخانه‌ای نصب نمی‌شود. هیچ تغییری در `scorer.ts`، `idfCalculator.ts`، یا `scoringWorker.ts` نیست.
+
 ---
 
 ## ۴. جریان داده جدید (Refactored Data Flow)
@@ -175,13 +183,24 @@ analysisService.startProjectAnalysis(projectId, model)
     │
     ├─→ candidateService.computeAndStore(projectId)
     │       │
-    │       └─→ scoringService.compute(pages)
-    │               │ postMessage to Web Worker
+    │       └─→ scoringService.computeAllAdaptive(pages)   ← R13
+    │               │
+    │               ├─ if (pages.length <= 1000) → Fast-Track (sync, main thread)
+    │               │
+    │               └─ else → Heavy-Track (postMessage to Web Worker)
+    │                           │
+    │                           ▼
+    │                     [scoringWorker.ts]
+    │                       computeIDFMap + computeAllCandidates  (BLACK BOX)
+    │                           ▼
+    │                     { idfMap, candidatesMap }
+    │               │
+    │               (نتیجه واحد بدون توجه به مسیر)
     │               ▼
-    │       [scoringWorker.ts]
-    │               │ computeIDFMap + computeAllCandidates (BLACK BOX)
-    │               ▼
-    │       candidateRepository.saveBatch(records)
+    │       db.transaction([idfCache, candidates])
+    │         ├─ idfRepository.upsertInTx(...)
+    │         ├─ candidateRepository.clearByProject(...)
+    │         └─ candidateRepository.bulkAdd(records)
     │
     └─→ queueRepository.create(projectId, totalPages)
             │
@@ -267,36 +286,122 @@ throw "تعداد تلاش‌ها به حداکثر رسید"
 
 ---
 
-## ۷. Web Worker
+## ۷. Web Worker (Heavy-Track Engine)
 
 ### فایل `src/workers/scoringWorker.ts`
+
+این فایل از R12 بدون تغییر باقی می‌ماند و **فقط در مسیر Heavy-Track** فراخوانی می‌شود.
+
 ```ts
 import { computeAllCandidates } from '../core/scoring/scorer';
 import { computeIDFMap } from '../core/scoring/idfCalculator';
 
 self.onmessage = (e) => {
   const { type, payload } = e.data;
-  if (type === 'COMPUTE') {
-    const candidates = computeAllCandidates(payload.pages);
-    self.postMessage({ type: 'DONE', payload: serializeMap(candidates) });
+  if (type === 'COMPUTE_ALL') {
+    const idfMap = computeIDFMap(payload.pages);
+    const candidatesMap = computeAllCandidates(payload.pages);
+    const candidatesArray = Array.from(candidatesMap.entries())
+      .map(([pageId, list]) => [pageId, list.slice(0, 50)]);
+    self.postMessage({ type: 'DONE_ALL', payload: { idfMap, candidates: candidatesArray } });
   }
 };
 ```
 
-### فایل `src/services/scoring/scoringService.ts`
+### فایل `src/services/scoring/scoringService.ts` (Heavy-Track caller)
+
 ```ts
-// import با ?worker سینتکس Vite
 import ScoringWorker from '../../workers/scoringWorker?worker';
 
-export async function computeCandidatesInWorker(pages) {
-  return new Promise((resolve, reject) => {
-    const w = new ScoringWorker();
-    w.onmessage = (e) => { resolve(e.data.payload); w.terminate(); };
-    w.onerror = reject;
-    w.postMessage({ type: 'COMPUTE', payload: { pages } });
-  });
+export async function computeAllInWorker(pages) {
+  // یک ورکر اسپاون، postMessage(COMPUTE_ALL)، دریافت DONE_ALL، terminate.
 }
 ```
+
+---
+
+## ۷.۵. Adaptive Scoring Pipeline (R13) — **مفهوم کلیدی**
+
+### چرا این لایه وجود دارد
+
+بعد از پیاده‌سازی R12، روی پروژه‌های بزرگ (۵۰۰۰+ صفحه) پرفورمنس عالی شد. اما اندازه‌گیری روی پروژه‌های کوچک/متوسط (مثلاً ۷۰۰ صفحه) یک رگرسیون نشان داد:
+
+- قبل از ریفکتور: کل محاسبه روی Main Thread حدود **۱ ثانیه**.
+- بعد از R12: همان محاسبه چند ثانیه طول می‌کشد چون سربار ثابت **اسپاون ورکر + structured-clone + Vite worker bootstrap** برای دیتای کوچک، خود بزرگ‌تر از زمان واقعی محاسبه است.
+
+**نتیجه‌گیری معماری:** Web Worker فقط زمانی سودده است که حجم کار از یک آستانه بحرانی بالاتر باشد. زیر آن آستانه، اجرای مستقیم روی Main Thread سریع‌تر و ساده‌تر است و چون کل عملیات زیر یک ثانیه طول می‌کشد، UI Freeze محسوس نیست.
+
+### قانون تطبیقی (Threshold)
+
+ثابت سراسری:
+
+```ts
+export const SCORING_FAST_TRACK_THRESHOLD = 1000;
+```
+
+دو مسیر در `scoringService.ts`:
+
+#### مسیر A — Fast-Track (pages.length ≤ 1000)
+
+- **هیچ ورکری اسپاون نمی‌شود.**
+- `computeIDFMap(pages)` و `computeAllCandidates(pages)` مستقیماً و **به‌صورت همگام (sync)** روی Main Thread فراخوانی می‌شوند.
+- خروجی `computeAllCandidates` که یک `Map` است، با همان قانون قبلی **به ۵۰ کاندیدای برتر برش داده می‌شود** (`list.slice(0, 50)`) تا قرارداد خروجی با Heavy-Track بایت‌به‌بایت یکسان باقی بماند.
+- نتیجه به همان شکل `{ idfMap, candidatesMap }` به caller بازگردانده می‌شود.
+- چون کل کار زیر ~۵۰۰ms است، هیچ نیازی به chunk-yielding یا `setTimeout(0)` نیست.
+
+#### مسیر B — Heavy-Track (pages.length > 1000)
+
+- دقیقاً همان مسیر R12: فراخوانی `computeAllInWorker(pages)` که داخل خود یک ورکر اسپاون می‌کند، `COMPUTE_ALL` می‌فرستد، `DONE_ALL` می‌گیرد و ترمینیت می‌کند.
+- مسیر و بهینه‌سازی‌های R12 (حذف `categories: cat`، slice(50)، pre-warm worker) دست‌نخورده می‌مانند.
+
+### قرارداد خروجی واحد
+
+هر دو مسیر دقیقاً همین شکل را برمی‌گردانند:
+
+```ts
+{
+  idfMap: IDFMap,
+  candidatesMap: Map<number, CandidateWithTags[]>  // هر لیست حداکثر ۵۰ آیتم
+}
+```
+
+این تضمین می‌کند که caller (`candidateStorage.ts`) هیچ branching بر اساس مسیر ندارد.
+
+### نمودار تصمیم
+
+```
+            ┌──────────────────────────────┐
+            │   scoringService.            │
+            │   computeAllAdaptive(pages)  │
+            └──────────────┬───────────────┘
+                           │
+                  pages.length <= 1000 ?
+                           │
+              ┌────────────┴────────────┐
+             yes                        no
+              │                         │
+              ▼                         ▼
+   ┌──────────────────────┐  ┌──────────────────────┐
+   │ Fast-Track (sync)    │  │ Heavy-Track (worker) │
+   │  computeIDFMap       │  │  computeAllInWorker  │
+   │  computeAllCandidates│  │  (R12 path)          │
+   │  slice(0,50)         │  │                      │
+   └──────────┬───────────┘  └──────────┬───────────┘
+              │                         │
+              └─────────────┬───────────┘
+                            ▼
+                  { idfMap, candidatesMap }
+                            │
+                            ▼
+              db.transaction (شامل upsertInTx + clear + bulkAdd)
+```
+
+### قواعد ثابت R13
+
+- **آستانه ۱۰۰۰** به‌صورت ثابت export شده در `scoringService.ts` نگه داشته می‌شود. هیچ env-var یا setting کاربری برای آن نیست.
+- **هیچ تغییری در `scorer.ts`، `idfCalculator.ts`، یا `scoringWorker.ts` انجام نمی‌شود.**
+- **هیچ تغییری در ساختار transaction Dexie** نیست؛ همان `db.transaction('rw', [db.idfCache, db.candidates], ...)` که در R12 ساخته شد، در هر دو مسیر مصرف می‌شود.
+- **هیچ duplication در منطق slice(0,50) قابل قبول نیست**، اما چون ورکر و Fast-Track دو محل اجرای مستقل هستند، هر یک slice خودش را اعمال می‌کند تا قرارداد خروجی واحد حفظ شود (این تنها تکرار مجاز است و دو خط است).
 
 ---
 
