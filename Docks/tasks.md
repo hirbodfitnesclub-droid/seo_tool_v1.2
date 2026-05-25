@@ -1,723 +1,372 @@
-# tasks.md — نقشه راه مرجع (سیستم جدید بررسی لینک‌ها)
+# tasks.md — نقشه راه ریفکتور لایه‌ای (فاز ۱.۵)
 
-> ترتیب تسک‌ها اجباری است. هر تسک روی خروجی تسک قبلی تکیه دارد.
-> قبل از شروع هر تسک، فایل‌های CONTEXT_FILES را بخوان.
-
----
-
-## تسک ۱ — به‌روزرسانی اسکیمای دیتابیس
-
-### هدف
-اضافه کردن دو جدول جدید به Dexie: `candidates` (برای ذخیره ۲۰ کاندیدای هر صفحه) و `analysisQueue` (برای مدیریت صف پردازش AI).
-
-### راهنمای پیاده‌سازی فنی
-
-1. **`src/db.ts`**: نسخه دیتابیس را از 1 به 2 تغییر بده و دو جدول جدید اضافه کن:
-
-   ```ts
-   // جدول candidates — ۲۰ کاندیدای هر صفحه (قبل از AI)
-   export interface Candidate {
-     id?: number;
-     project_id: number;
-     source_page_id: number;
-     candidate_list: string; // JSON آرایه: [{ page_id, title, score, matched_tags }]
-     computed_at: string;
-   }
-
-   // جدول analysisQueue — صف پردازش AI
-   export interface AnalysisQueue {
-     id?: number;
-     project_id: number;
-     status: 'pending' | 'processing' | 'completed' | 'failed' | 'paused';
-     current_page_index: number;
-     total_pages: number;
-     error_message: string | null;
-     started_at: string;
-     updated_at: string;
-   }
-   ```
-
-2. اسکیمای Dexie را آپدیت کن:
-   ```ts
-   this.version(2).stores({
-     projects: '++id, name, created_at',
-     pages: '++id, project_id, title',
-     weights: '++id, project_id, category_name',
-     candidates: '++id, project_id, source_page_id',
-     results: '++id, project_id, source_page_id',
-     analysisQueue: '++id, project_id'
-   });
-   ```
-
-3. فیلد `is_manual_edit` را به interface `Result` اضافه کن.
-
-### محدودیت‌های این تسک
-- ✅ فقط تغییرات schema — هیچ منطق بیزینسی جدید
-- ✅ از `upgrade()` برای migration استفاده نکن؛ این یک fresh install است
-- ⛔ هیچ کامپوننت UI تغییر نکند
-
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/db.ts"]`
+> فاز ۱ (تسک‌های ۱ تا ۱۱) کامل شده و در history این فایل بایگانی است. این نسخه فقط تسک‌های ریفکتور را تعریف می‌کند.
 
 ---
 
-## تسک ۲ — آپدیت موتور امتیازدهی برای نمایش تگ‌های مشترک
+## قوانین مشترک تمام تسک‌های این فاز
+
+این بندها برای **هر تسک** بدون استثنا اعمال می‌شوند:
+
+۱. **حق نداری هیچ کدی رو حدس بزنی؛ همین الان با ابزار caling_tool فایل های کانتکست رو به صورت زنده فراخوانی کن و بخون و سپس کد این تسک رو بزن.**
+
+۲. **الگوریتم `scorer.ts` و خروجی عددی آن مطلقاً تغییر نمی‌کند.** کپی مرجع در ریشه پروژه (`/scorer.ts`) قرار دارد. بعد از هر تسکی که به `scorer` نزدیک می‌شود، خروجی این فایل را با کپی مرجع `diff` بگیر و اطمینان حاصل کن فقط `import path`ها تغییر کرده‌اند.
+
+۳. هیچ کتابخانه جدیدی اضافه نمی‌شود مگر `zod` (در تسک ۳). سایر افزایش‌ها ممنوع.
+
+۴. کامنت‌ها فارسی. متن UI فارسی. RTL.
+
+۵. اگر یک فایل قدیمی به مکان جدید منتقل شد، در محل قدیمی **یک شیم re-export** بگذار تا importهای موجود نشکنند. در آخرین تسک شیم‌ها پاک می‌شوند.
+
+۶. هیچ تسکی نباید رفتار قابل مشاهده برای کاربر را تغییر دهد. این فاز ریفکتور است نه ویژگی.
+
+---
+
+## تسک R1 — لایه Infrastructure: ساخت Repository Pattern روی Dexie
 
 ### هدف
-تغییر در `scorer.ts` برای برگرداندن لیست تگ‌های مشترک علاوه بر امتیاز. این اطلاعات به کاربر نشان داده می‌شود و به AI هم برای تحلیل بهتر ارسال می‌شود.
+حذف وابستگی مستقیم کامپوننت‌ها و هوک‌ها به `db.*`. تمام دسترسی به Dexie پشت تعدادی تابع async در `src/repositories/*` قرار می‌گیرد.
 
 ### راهنمای پیاده‌سازی فنی
+۱. پوشه `src/repositories/` بساز.
+۲. این فایل‌ها را ایجاد کن — هر کدام فقط توابع async ناب با signature تایپ‌دار:
+   - `projectRepository.ts` → `getById`, `list`, `create`, `update`, `remove`
+   - `pageRepository.ts` → `listByProject`, `getById`, `bulkAdd`, `countByProject`
+   - `weightRepository.ts` → `listByProject`, `bulkUpsert`
+   - `candidateRepository.ts` → `getByPage`, `bulkAdd`, `clearByProject`, `countByProject`
+   - `resultRepository.ts` → `getByPage`, `listByProject`, `upsert`, `clearByProject`
+   - `queueRepository.ts` → `getByProject`, `create`, `update`, `markStatus(id, status)`, `advance(id, idx)`, `findInterrupted()`
+   - `idfRepository.ts` → `getByProject`, `upsert`
+۳. هیچ کامپوننت/هوکی در این تسک ویرایش نشود؛ فقط زیرساخت اضافه می‌شود.
+۴. هر فایل با کامنت فارسی هدر شروع شود که مسئولیتش را توضیح دهد.
 
-1. **`src/utils/scorer.ts`**:
+### محدودیت‌ها
+- ✅ فقط wrapper روی `db.*` — هیچ منطق بیزینسی
+- ✅ هر تابع باید Promise بازگرداند با تایپ خروجی دقیق
+- ⛔ هیچ import از React یا lucide یا کامپوننت
 
-   **تغییر در interface `Candidate`:**
-   ```ts
-   export interface CandidateWithTags {
-     page_id: number;
-     title: string;
-     score: number;
-     matched_tags: string[]; // فیلد جدید — نام تگ‌های مشترک
-   }
-   ```
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/db.ts", "src/hooks/useAnalysisQueue.ts", "src/utils/queueProcessor.ts", "src/utils/candidateStorage.ts"]`
 
-   **اضافه کردن تابع جدید `getMatchedTags`:**
-   ```ts
-   // برگرداندن لیست تگ‌هایی که بین دو صفحه مشترک هستند
-   export function getMatchedTags(catA: CategoriesMap, catB: CategoriesMap): string[] {
-     const matched: string[] = [];
-     Object.keys(catA).forEach((field) => {
-       if (catA[field] !== null && catB[field] !== null && catA[field] === catB[field]) {
-         matched.push(field);
-       }
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان با ابزار caling_tool فایل های کانتکست رو به صورت زنده فراخوانی کن و بخون و سپس کد این تسک رو بزن.
+
+---
+
+## تسک R2 — لایه API: کلاینت Gemini با Exponential Backoff + جداسازی PromptBuilder
+
+### هدف
+شکستن `src/utils/gemini.ts` به سه فایل با مسئولیت‌های جدا، و افزودن مقاومت در برابر خطاهای 429 و 5xx.
+
+### راهنمای پیاده‌سازی فنی
+۱. پوشه `src/services/api/` بساز.
+۲. `src/services/api/promptBuilder.ts`:
+   - تابع `buildSinglePagePrompt` را **بدون تغییر متن پرامپت** از `src/utils/gemini.ts` به اینجا منتقل کن.
+   - تابع legacy `buildPrompt` را هم منتقل کن.
+۳. `src/services/api/geminiSchema.ts`:
+   - **این تسک نصب Zod است.** ابتدا با Bash نصب کن: `pnpm add zod` (یا package manager پروژه — lockfile را چک کن).
+   - schema تعریف کن:
+     ```ts
+     export const GeminiSelectedLinksSchema = z.object({
+       user_intent: z.string().optional(),
+       selected_links: z.array(z.object({
+         page_id: z.number(),
+         title: z.string(),
+         reason: z.string()
+       }))
      });
-     return matched;
-   }
-   ```
+     ```
+۴. `src/services/api/geminiClient.ts`:
+   - تابع `callGemini(prompt, model)` با همان signature قبلی.
+   - حلقه retry با حداکثر ۵ تلاش.
+   - فقط برای `429` و `5xx` retry با delay `min(60000, 2^attempt * 1000 + random jitter 0-500)`.
+   - بعد از parse JSON، آن را با `GeminiSelectedLinksSchema.safeParse` اعتبارسنجی کن. اگر invalid بود، error با پیام فارسی throw کن.
+۵. `src/utils/gemini.ts` را به یک شیم re-export تبدیل کن که `callGemini` و `buildSinglePagePrompt` و `buildPrompt` را از مسیرهای جدید export می‌کند — به این ترتیب importهای فعلی در `queueProcessor.ts` و سایر جاها نمی‌شکنند.
 
-   **تغییر در `findTopCandidates`:**
-   - خروجی را از `Candidate[]` به `CandidateWithTags[]` تغییر بده
-   - در map، علاوه بر score، فیلد `matched_tags` را هم با صدا زدن `getMatchedTags` پر کن
+### محدودیت‌ها
+- ✅ متن پرامپت یک بایت هم تغییر نکند
+- ✅ signature تابع `callGemini` ثابت بماند
+- ⛔ بدون تغییر در `/api/gemini` proxy یا `server.ts`
 
-   **تغییر در `computeAllCandidates`:**
-   - نوع خروجی Map را به `Map<number, CandidateWithTags[]>` تغییر بده
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/utils/gemini.ts", "src/utils/queueProcessor.ts", "src/pages/PageDetail.tsx", "package.json"]`
 
-2. مطمئن شو که توابع موجود به درستی کار می‌کنند و هیچ چیز خراب نشود.
-
-### محدودیت‌های این تسک
-- ✅ توابع قبلی باید همچنان کار کنند (backward compatible)
-- ✅ `matched_tags` باید نام فارسی فیلدها باشد (مثلاً `"کشور_مقصد"`)
-- ⛔ هیچ side effect نباشد
-- ⛔ هیچ import جدید لازم نیست
-
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/utils/scorer.ts", "src/constants/categories.ts"]`
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان با ابزار caling_tool فایل های کانتکست رو به صورت زنده فراخوانی کن و بخون و سپس کد این تسک رو بزن.
 
 ---
 
-## تسک ۳ — ساخت تابع ذخیره‌سازی کاندیداها و Route جدید
+## تسک R3 — مقاوم‌سازی CSV Parser با Zod
 
 ### هدف
-ساختن یک تابع که امتیازدهی الگوریتمی را اجرا کند و نتایج را در جدول `candidates` ذخیره کند. همچنین اضافه کردن route‌های جدید به App.tsx.
+جلوگیری از crash برنامه وقتی ستون CSV گم یا نامعتبر است. خطاها به صورت گزارش به کاربر برمی‌گردند نه exception.
 
 ### راهنمای پیاده‌سازی فنی
+۱. `src/services/io/csvParser.ts` بساز.
+۲. منطق فعلی `src/utils/csvParser.ts` را به اینجا منتقل کن، اما:
+   - یک `z.object({...})` schema بر اساس `CATEGORIES` (از `src/constants/categories.ts`) بساز که فیلد `'عنوان_H1'` اجباری و باقی optional/nullable.
+   - برای هر ردیف `safeParse` اجرا کن؛ اگر invalid بود به آرایه `errors` پیام واضح فارسی اضافه کن (مثلاً «ردیف ۴۲: ستون عنوان_H1 خالی است») و آن ردیف را skip کن.
+   - تابع `sanitizeString` همان است.
+۳. signature خروجی `parseCSV` (یعنی `ParseResult`) و نحوه استفاده آن تغییر نکند.
+۴. `src/utils/csvParser.ts` را به شیم re-export تبدیل کن.
 
-1. **`src/utils/candidateStorage.ts`** (فایل جدید):
-   ```ts
-   // این تابع برای یک پروژه:
-   // 1. تمام pages را بخوان
-   // 2. computeAllCandidates را صدا بزن
-   // 3. نتایج را در جدول candidates ذخیره کن
-   
-   export async function computeAndStoreCandidates(
-     projectId: number,
-     pages: Page[],
-     weights: Record<string, number>,
-     mode: 'linear' | 'weighted'
-   ): Promise<void> {
-     // کاندیداهای قبلی این پروژه را پاک کن
-     await db.candidates.where('project_id').equals(projectId).delete();
-     
-     // محاسبه کاندیداها
-     const candidatesMap = computeAllCandidates(pages, weights, mode);
-     
-     // آماده‌سازی برای bulk insert
-     const now = new Date().toISOString();
-     const records = Array.from(candidatesMap.entries()).map(([pageId, list]) => ({
-       project_id: projectId,
-       source_page_id: pageId,
-       candidate_list: JSON.stringify(list),
-       computed_at: now
-     }));
-     
-     // ذخیره یکجا
-     await db.candidates.bulkAdd(records);
-   }
-   ```
+### محدودیت‌ها
+- ✅ قراردادهای ورودی/خروجی تابع `parseCSV` ثابت
+- ✅ ردیف‌های invalid حذف می‌شوند نه کل فایل
+- ⛔ هیچ تغییر در UI آپلود (`NewProject.tsx`)
 
-2. **`src/App.tsx`**: دو route جدید اضافه کن:
-   ```tsx
-   <Route path="/project/:projectId" element={<ProjectPages />} />
-   <Route path="/project/:projectId/page/:pageId" element={<PageDetail />} />
-   ```
-   فعلاً برای کامپوننت‌ها placeholder بگذار (یک div ساده).
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/utils/csvParser.ts", "src/constants/categories.ts", "src/pages/NewProject.tsx"]`
 
-3. **`src/pages/ProjectPages.tsx`** (فایل جدید — placeholder):
-   ```tsx
-   export default function ProjectPages() {
-     return <div>صفحه لیست صفحات پروژه — در تسک بعدی ساخته می‌شود</div>;
-   }
-   ```
-
-4. **`src/pages/PageDetail.tsx`** (فایل جدید — placeholder):
-   ```tsx
-   export default function PageDetail() {
-     return <div>صفحه جزئیات — در تسک بعدی ساخته می‌شود</div>;
-   }
-   ```
-
-### محدودیت‌های این تسک
-- ✅ تابع `computeAndStoreCandidates` باید transaction-safe باشد
-- ✅ قبل از insert، رکوردهای قبلی پاک شوند
-- ⛔ هنوز UI نمایش کاندیداها ساخته نشود
-
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/db.ts", "src/utils/scorer.ts", "src/App.tsx"]`
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان با ابزار caling_tool فایل های کانتکست رو به صورت زنده فراخوانی کن و بخون و سپس کد این تسک رو بزن.
 
 ---
 
-## تسک ۴ — صفحه لیست صفحات پروژه (ProjectPages)
+## تسک R4 — انتقال Core Algorithm به مکان جدید (بدون تغییر منطق)
 
 ### هدف
-ساختن صفحه‌ای که تمام صفحات یک پروژه را نشان می‌دهد. هر صفحه قابل کلیک است. دکمه «تحلیل هوشمند همه صفحات» در بالا قرار دارد.
-
-### یوزر فلو
-1. کاربر از صفحه Home روی پروژه کلیک می‌کند و به این صفحه می‌رسد
-2. می‌بیند: لیست تمام صفحات، وضعیت هر صفحه (تحلیل‌شده/نشده)، دکمه تحلیل کلی
-3. می‌تواند روی هر صفحه کلیک کند تا به PageDetail برود
-4. می‌تواند دکمه «تحلیل هوشمند همه صفحات» را بزند
+جداسازی منطق امتیازدهی از پوشه `utils` و انتقال به `src/core/scoring/` به‌گونه‌ای که در Web Worker قابل اجرا باشد (هیچ ارجاع به `window`/`document`/`db` نداشته باشد).
 
 ### راهنمای پیاده‌سازی فنی
-
-1. **`src/pages/ProjectPages.tsx`**:
-   
-   **Header:**
-   - نام پروژه
-   - دکمه «تحلیل هوشمند همه صفحات» (با آیکون Brain یا Sparkles)
-   - دکمه «مشاهده نتایج نهایی» (لینک به Results)
-   - دکمه «تنظیمات» (لینک به Config)
-
-   **بخش وضعیت:**
-   - اگر `analysisQueue` برای این پروژه وجود دارد و status=processing:
-     - نمایش نوار پیشرفت: `current_page_index / total_pages`
-     - دکمه «توقف موقت»
-   - اگر status=paused:
-     - نمایش «پردازش متوقف شده» + دکمه «ادامه»
-   - اگر status=failed:
-     - نمایش پیام خطا + دکمه «تلاش مجدد از ادامه»
-
-   **لیست صفحات:**
-   - یک جدول یا گرید از کارت‌ها
-   - هر آیتم: عنوان صفحه، تعداد کاندیدا، وضعیت (آیکون چک اگر result دارد)
-   - کلیک روی هر آیتم: navigate به `/project/:projectId/page/:pageId`
-
-   **جستجو:**
-   - یک input برای فیلتر کردن صفحات بر اساس عنوان
-
-2. **داده‌خوانی:**
+۱. پوشه `src/core/scoring/` بساز.
+۲. `src/utils/scorer.ts` را به `src/core/scoring/scorer.ts` **کپی کن — بدون یک کاراکتر تغییر در توابع، ضرایب، یا ترتیب لایه‌ها.** فقط مسیر `import { PERSIAN_MONTHS_ORDER, MONTH_TO_SEASON } from '../constants/categories'` به `'../../constants/categories'` تغییر می‌کند.
+۳. `src/utils/idfCalculator.ts` را به همان روش به `src/core/scoring/idfCalculator.ts` منتقل کن. مسیر `import { type Page } from '../db'` به این تبدیل می‌شود: یک type محلی `interface PageLike { categories: string }` در همان فایل تعریف کن و وابستگی به `db.ts` را قطع کن (زیرا core نباید به Dexie وصل باشد). signature `computeIDFMap(pages)` ثابت می‌ماند چون فقط `categories: string` استفاده می‌شود.
+۴. تأیید کن هیچ‌جای فایل scorer جدید به `db`، `window`، `document`، یا React وابسته نیست.
+۵. فایل‌های قدیمی `src/utils/scorer.ts` و `src/utils/idfCalculator.ts` را به شیم re-export تبدیل کن:
    ```ts
-   const pages = useLiveQuery(() => db.pages.where('project_id').equals(projectId).toArray());
-   const results = useLiveQuery(() => db.results.where('project_id').equals(projectId).toArray());
-   const queue = useLiveQuery(() => db.analysisQueue.where('project_id').equals(projectId).first());
+   export * from '../core/scoring/scorer';
    ```
+۶. **اعتبارسنجی نهایی:** فایل `src/core/scoring/scorer.ts` را با `/scorer.ts` (کپی مرجع کاربر در ریشه) از نظر منطقی diff بگیر. تنها تفاوت مجاز: مسیر import.
 
-3. **منطق دکمه «تحلیل هوشمند همه صفحات»:**
-   - اگر queue وجود ندارد یا status=completed/failed: یک queue جدید بساز و navigate به حالت پردازش
-   - این دکمه فقط queue را می‌سازد — پردازش واقعی در تسک بعدی پیاده می‌شود
+### محدودیت‌ها
+- ✅ منطق scorer دست‌نخورده
+- ✅ test فایل `src/utils/scorer.test.ts` باید بدون تغییر pass شود
+- ⛔ هیچ تغییر در signature توابع صادر شده
 
-### محدودیت‌های این تسک
-- ✅ از `useLiveQuery` برای reactive data استفاده کن
-- ✅ UI باید responsive باشد (موبایل و دسکتاپ)
-- ⛔ پردازش واقعی AI در این تسک پیاده نمی‌شود — فقط UI
-- ⛔ دکمه تحلیل کلی فقط queue بسازد، نه اجرا
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "scorer.ts", "src/utils/scorer.ts", "src/utils/idfCalculator.ts", "src/utils/scorer.test.ts", "src/constants/categories.ts"]`
 
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/db.ts", "src/hooks/useProject.ts", "src/pages/Home.tsx", "src/components/ui/Button.tsx"]`
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان با ابزار caling_tool فایل های کانتکست رو به صورت زنده فراخوانی کن و بخون و سپس کد این تسک رو بزن.
 
 ---
 
-## تسک ۵ — صفحه جزئیات صفحه (PageDetail)
+## تسک R5 — انتقال محاسبه سنگین به Web Worker
 
 ### هدف
-ساختن صفحه‌ای که جزئیات یک صفحه خاص را نشان می‌دهد: اطلاعات صفحه، ۲۰ کاندیدا، لینک‌های انتخاب‌شده، و امکان ویرایش دستی.
-
-### یوزر فلو
-1. کاربر از ProjectPages روی یک صفحه کلیک می‌کند
-2. می‌بیند: اطلاعات صفحه، لیست ۲۰ کاندیدا، لینک‌های پیشنهادی AI (اگر وجود دارد)
-3. می‌تواند دکمه «بررسی با هوش مصنوعی» را بزند (فقط این صفحه)
-4. می‌تواند لینک‌ها را دستی ویرایش کند: اضافه، حذف، تغییر اولویت
+خروج `computeAllCandidates` و `computeIDFMap` از Main Thread برای حذف UI Freeze در پروژه‌های چند هزار صفحه‌ای.
 
 ### راهنمای پیاده‌سازی فنی
+۱. `src/workers/scoringWorker.ts` بساز:
+   - import از `../core/scoring/scorer` و `../core/scoring/idfCalculator`
+   - گوش دادن به message با `type: 'COMPUTE'`، اجرا، و post نتیجه با `type: 'DONE'` یا `type: 'ERROR'`.
+   - چون خروجی scorer یک `Map` است، قبل از postMessage آن را به `Array.from(map.entries())` تبدیل کن (Map قابل clone نیست).
+۲. `src/services/scoring/scoringService.ts` بساز:
+   - تابع `computeCandidatesInWorker(pages): Promise<Map<number, CandidateWithTags[]>>`
+   - از سینتکس Vite worker: `import ScoringWorker from '../../workers/scoringWorker?worker'`
+   - بعد از دریافت پیام، آرایه را دوباره به Map تبدیل کن و worker را terminate کن.
+   - تابع `computeIDFInWorker(pages): Promise<IDFMap>` هم اضافه کن.
+۳. `src/utils/candidateStorage.ts` را آپدیت کن:
+   - به‌جای صدا زدن مستقیم `computeAllCandidates` و `computeIDFMap`، از `scoringService` استفاده کن.
+   - دسترسی به Dexie را با `candidateRepository` و `idfRepository` (از تسک R1) جایگزین کن.
 
-1. **`src/pages/PageDetail.tsx`**:
+### محدودیت‌ها
+- ✅ خروجی نهایی ذخیره‌شده در Dexie باید **بایت-به-بایت** با قبل برابر باشد (همان الگوریتم، همان داده)
+- ✅ کاربر باید UI روان داشته باشد حتی با ۵۰۰۰ صفحه
+- ⛔ هیچ logic algorithm درون worker تغییر نکند — فقط فراخوانی توابع core
 
-   **Header:**
-   - breadcrumb: نام پروژه > نام صفحه
-   - دکمه «برگشت به لیست»
-   - دکمه «بررسی با هوش مصنوعی» (فقط این صفحه)
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/utils/candidateStorage.ts", "src/core/scoring/scorer.ts", "src/core/scoring/idfCalculator.ts", "vite.config.ts", "src/repositories/candidateRepository.ts", "src/repositories/idfRepository.ts"]`
 
-   **بخش اطلاعات صفحه:**
-   - عنوان صفحه (H1)
-   - جدول تگ‌ها: نمایش ۱۸ فیلد دسته‌بندی که مقدار غیرnull دارند
-   - نمایش زیبا با Badge برای هر تگ
-
-   **بخش کاندیداها (۲۰ صفحه مشابه):**
-   - عنوان: «صفحات مشابه (امتیازدهی الگوریتمی)»
-   - لیست ۲۰ کاندیدا از جدول `candidates`
-   - هر آیتم: عنوان، امتیاز، تگ‌های مشترک (به شکل Badge)
-   - **قابلیت انتخاب دستی:** چک‌باکس کنار هر کاندیدا برای اضافه کردن به لینک‌های نهایی
-
-   **بخش لینک‌های پیشنهادی (نتیجه AI یا دستی):**
-   - عنوان: «لینک‌های انتخاب‌شده»
-   - اگر result برای این صفحه وجود دارد: نمایش لینک‌ها با reason
-   - اگر نه: «هنوز تحلیل نشده»
-   - **قابلیت ویرایش:**
-     - drag & drop برای تغییر اولویت
-     - دکمه حذف برای هر لینک
-     - اضافه کردن از لیست کاندیداها با چک‌باکس
-   - دکمه «ذخیره تغییرات» که `is_manual_edit: true` ست می‌کند
-
-2. **داده‌خوانی:**
-   ```ts
-   const page = useLiveQuery(() => db.pages.get(pageId));
-   const candidate = useLiveQuery(() => db.candidates.where('source_page_id').equals(pageId).first());
-   const result = useLiveQuery(() => db.results.where('source_page_id').equals(pageId).first());
-   ```
-
-3. **منطق دکمه «بررسی با هوش مصنوعی»:**
-   - این دکمه فقط این یک صفحه را بررسی می‌کند (نه کل پروژه)
-   - در تسک بعدی پیاده‌سازی می‌شود — فعلاً placeholder
-
-### محدودیت‌های این تسک
-- ✅ ویرایش دستی باید `is_manual_edit: true` بگذارد
-- ✅ UI برای drag & drop می‌تواند ساده باشد (دکمه بالا/پایین کافی است)
-- ⛔ پردازش AI در این تسک پیاده نمی‌شود
-- ⛔ از کتابخانه drag & drop استفاده نکن — دستی پیاده کن
-
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/db.ts", "src/pages/ProjectPages.tsx", "src/components/ui/Badge.tsx", "src/components/ui/Button.tsx"]`
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان با ابزار caling_tool فایل های کانتکست رو به صورت زنده فراخوانی کن و بخون و سپس کد این تسک رو بزن.
 
 ---
 
-## تسک ۶ — پردازش AI تکی (یک صفحه)
+## تسک R6 — شکستن queueProcessor به QueueManager + TaskExecutor + Coordinator
 
 ### هدف
-پیاده‌سازی منطق دکمه «بررسی با هوش مصنوعی» که فقط یک صفحه و ۲۰ کاندیدایش را به AI می‌فرستد.
+حذف فایل خداگونه `queueProcessor.ts` و تقسیم به سه ماژول با مسئولیت تک‌وظیفه‌ای (SRP).
 
 ### راهنمای پیاده‌سازی فنی
+۱. پوشه `src/core/queue/` بساز.
 
-1. **`src/utils/gemini.ts`** — اضافه کردن تابع جدید:
+۲. `src/core/queue/QueueManager.ts`:
+   - فقط مسئول state transitions صف.
+   - متدها: `start(projectId, totalPages, model)`, `markProcessing(queueId)`, `markPaused(queueId)`, `markCompleted(queueId)`, `markFailed(queueId, error)`, `advance(queueId, newIndex)`, `isPausedOrFailed(queueId)`.
+   - تمام عملیات Dexie از طریق `queueRepository` (تسک R1) انجام شود.
 
-   **تابع `buildSinglePagePrompt`:**
+۳. `src/core/queue/TaskExecutor.ts`:
+   - یک متد `executePage(projectId, pageId, model): Promise<void>`.
+   - مراحل: `candidateRepository.getByPage` → enrichment فعلی → `promptBuilder.buildSinglePagePrompt` → `geminiClient.callGemini` → `resultRepository.upsert` در یک transaction.
+   - **منطق enrichment کاندیداها** (همان `enrichedCandidates` در queueProcessor فعلی که categories را از pages می‌گیرد) را دقیقاً منتقل کن.
+
+۴. `src/core/queue/QueueCoordinator.ts`:
+   - تابع entry: `runQueue(projectId): Promise<void>`.
+   - حلقه از `current_page_index` تا `total_pages`:
+     - چک `QueueManager.isPausedOrFailed` در هر iteration
+     - `TaskExecutor.executePage(...)`
+     - `QueueManager.advance(...)`
+     - `sleep(2000)`
+   - در پایان `markCompleted`. در exception داخلی `markFailed`.
+
+۵. `src/utils/queueProcessor.ts` را به شیم تبدیل کن:
    ```ts
-   export function buildSinglePagePrompt(
-     sourcePage: { title: string; categories: object },
-     candidates: CandidateWithTags[]
-   ): string {
-     // پرامپت مخصوص یک صفحه — بدون محدودیت تعداد
-     return `
-   SYSTEM:
-   تو یک متخصص SEO هستی. وظیفه‌ات انتخاب بهترین لینک‌های داخلی است.
+   export { runQueue as processQueue } from '../core/queue/QueueCoordinator';
+   ```
 
-   USER:
-   یک صفحه از سایت و ${candidates.length} صفحه کاندیدا برای لینک‌سازی داده شده.
-   از بین کاندیداها، **هر صفحه‌ای که واقعاً از نظر معنایی مرتبط است را انتخاب کن**.
-   تعداد مهم نیست — فقط کیفیت و ارتباط واقعی مهم است.
-   اگر همه ۲۰ کاندیدا مرتبط هستند، همه را انتخاب کن.
-   اگر فقط ۳ تا مرتبط هستند، فقط ۳ تا را انتخاب کن.
+### محدودیت‌ها
+- ✅ رفتار قابل مشاهده صف یکسان (مکث ۲ ثانیه، ذخیره دانه‌به‌دانه، pause/resume)
+- ✅ `TaskExecutor` به Web Worker وابسته نیست (فقط `Coordinator` و `Worker` در آینده برای scoring استفاده می‌شوند)
+- ⛔ بدون تغییر در فرمت ذخیره `results`
 
-   معیار: شباهت معنایی، ارتباط موضوعی، و تکمیل‌کنندگی سفر کاربر.
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/utils/queueProcessor.ts", "src/repositories/queueRepository.ts", "src/repositories/resultRepository.ts", "src/repositories/candidateRepository.ts", "src/repositories/pageRepository.ts", "src/services/api/promptBuilder.ts", "src/services/api/geminiClient.ts"]`
 
-   صفحه اصلی:
-   - عنوان: ${sourcePage.title}
-   - ویژگی‌ها: ${JSON.stringify(sourcePage.categories)}
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان با ابزار caling_tool فایل های کانتکست رو به صورت زنده فراخوانی کن و بخون و سپس کد این تسک رو بزن.
 
-   کاندیداها:
-   ${candidates.map((c, i) => `${i + 1}. ${c.title} — امتیاز: ${c.score} — تگ‌های مشترک: ${c.matched_tags.join(', ')}`).join('\n')}
+---
 
-   خروجی را فقط به صورت JSON خالص بده (بدون markdown):
-   {
-     "selected_links": [
-       { "page_id": 42, "title": "...", "reason": "..." }
-     ]
-   }
-     `;
+## تسک R7 — Auto-Resume Hook بعد از بسته شدن تب
+
+### هدف
+وقتی کاربر در میان پردازش تب را می‌بندد و دوباره باز می‌کند، صف‌هایی که status='processing' دارند ولی updated_at آن‌ها قدیمی است باید به وضعیت 'paused' تبدیل شوند تا کاربر بتواند آگاهانه resume کند.
+
+### راهنمای پیاده‌سازی فنی
+۱. `src/repositories/queueRepository.ts` (از تسک R1) — متد `findInterrupted()` را پیاده کن:
+   - تمام رکوردهای `status === 'processing'` که `updated_at` آن‌ها بیش از ۳۰ ثانیه از زمان فعلی فاصله دارد را بازگرداند.
+
+۲. `src/hooks/useQueueAutoResume.ts` بساز:
+   - یک `useEffect` با dependency خالی که در mount اول اپ اجرا می‌شود.
+   - `queueRepository.findInterrupted()` را صدا بزن و برای هر کدام `QueueManager.markPaused(id, 'برنامه به‌طور غیرمنتظره بسته شد. برای ادامه روی resume کلیک کنید.')` را اجرا کن.
+
+۳. `src/App.tsx` — هوک را در سطح بالای کامپوننت App صدا بزن (یک‌بار در lifetime اپ).
+
+### محدودیت‌ها
+- ✅ هیچ auto-resume خودکار. فقط mark as paused. کاربر دکمه را خودش بزند.
+- ✅ پیام خطا فارسی
+- ⛔ بدون تغییر در `QueueProgress.tsx` (پشتیبانی paused از قبل هست)
+
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/repositories/queueRepository.ts", "src/core/queue/QueueManager.ts", "src/App.tsx", "src/components/QueueProgress.tsx"]`
+
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان با ابزار caling_tool فایل های کانتکست رو به صورت زنده فراخوانی کن و بخون و سپس کد این تسک رو بزن.
+
+---
+
+## تسک R8 — Slim کردن useAnalysisQueue + ساخت Selector Hooks
+
+### هدف
+کاهش re-render در پروژه‌های با صفحات زیاد. هوک `useAnalysisQueue` فعلاً هر تغییر کوچک status باعث rerender کل لیست می‌شود.
+
+### راهنمای پیاده‌سازی فنی
+۱. `src/hooks/useAnalysisQueue.ts` — refactor:
+   - `useLiveQuery` همان جا بماند ولی توابع کنترل (`startQueue`, `pauseQueue`, `resumeQueue`) با `QueueManager` (تسک R6) جایگزین شوند نه فراخوانی مستقیم `db.*`.
+   - هیچ منطق پردازش در این هوک نباشد (فقط getter + control).
+
+۲. `src/hooks/useQueueStatus.ts` بساز (هوک سبک selector):
+   ```ts
+   // فقط فیلد status را برمی‌گرداند؛ تغییر current_page_index باعث re-render نمی‌شود
+   export function useQueueStatus(projectId: number): QueueStatus | undefined {
+     return useLiveQuery(
+       () => queueRepository.getByProject(projectId).then(q => q?.status),
+       [projectId]
+     );
    }
    ```
+   مشابه `useQueueProgress` (فقط `{ current, total }`).
 
-2. **`src/pages/PageDetail.tsx`** — پیاده‌سازی دکمه AI:
-   ```ts
-   const handleAIAnalysis = async () => {
-     setLoading(true);
-     setError(null);
-     
-     try {
-       const apiKey = localStorage.getItem('LINKMESH_API_KEY');
-       if (!apiKey) throw new Error('کلید API وارد نشده است.');
-       
-       // گرفتن کاندیداها
-       const candidateRecord = await db.candidates.where('source_page_id').equals(pageId).first();
-       if (!candidateRecord) throw new Error('ابتدا امتیازدهی الگوریتمی انجام دهید.');
-       
-       const candidateList = JSON.parse(candidateRecord.candidate_list);
-       const categories = JSON.parse(page.categories);
-       
-       // ساخت پرامپت — بدون محدودیت تعداد
-       const prompt = buildSinglePagePrompt({ title: page.title, categories }, candidateList);
-       
-       // فراخوانی AI
-       const response = await callGemini(prompt, apiKey);
-       
-       // ذخیره نتیجه
-       await db.results.where('source_page_id').equals(pageId).delete();
-       await db.results.add({
-         project_id: projectId,
-         source_page_id: pageId,
-         recommended_links: JSON.stringify(response.selected_links),
-         is_manual_edit: false,
-         generated_at: new Date().toISOString()
-       });
-       
-     } catch (err) {
-       setError(err.message);
-     } finally {
-       setLoading(false);
-     }
-   };
-   ```
+۳. `src/pages/ProjectPages.tsx`:
+   - جاهایی که فقط به `status` نیاز است از `useQueueStatus` استفاده کن.
+   - `QueueProgress` کامپوننت را با `React.memo` بپیچ.
+   - row صفحه‌ها در لیست را به یک کامپوننت جدا `PageListItem` با `React.memo` تبدیل کن.
 
-### محدودیت‌های این تسک
-- ✅ فقط یک صفحه + کاندیداهایش ارسال می‌شود
-- ✅ نتیجه بلافاصله در `results` ذخیره می‌شود
-- ✅ قبل از ذخیره، result قبلی این صفحه پاک شود
-- ⛔ اگر API Key نبود، پیام خطا نشان بده
+### محدودیت‌ها
+- ✅ رفتار UI ثابت بماند
+- ✅ هیچ خطای تایپ
+- ⛔ بدون تغییر در API هوک‌های صادر شده
 
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/utils/gemini.ts", "src/pages/PageDetail.tsx", "src/db.ts"]`
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/hooks/useAnalysisQueue.ts", "src/pages/ProjectPages.tsx", "src/components/QueueProgress.tsx", "src/repositories/queueRepository.ts", "src/core/queue/QueueManager.ts"]`
+
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان با ابزار caling_tool فایل های کانتکست رو به صورت زنده فراخوانی کن و بخون و سپس کد این تسک رو بزن.
 
 ---
 
-## تسک ۷ — سیستم صف پردازش AI (تحلیل کلی)
+## تسک R9 — انتقال منطق بیزینسی از کامپوننت‌ها به analysisService
 
 ### هدف
-پیاده‌سازی سیستم صفی که صفحات را یکی‌یکی به AI می‌فرستد، نتیجه هر کدام را فوراً ذخیره می‌کند، و در صورت قطع شدن، از همان جا ادامه می‌دهد.
-
-### قوانین حیاتی
-1. **هرگز همه صفحات یکجا ارسال نشوند** — فقط یک صفحه در هر call
-2. **ذخیره دانه‌به‌دانه** — بلافاصله بعد از دریافت جواب هر صفحه، در Dexie ذخیره شود
-3. **مکث بین درخواست‌ها** — ۲ ثانیه بین هر call (برای جلوگیری از rate limit)
-4. **قابلیت resume** — اگر وسط کار قطع شد، از آخرین index ادامه دهد
+صفحات React باید Dumb باشند. تمام handlerهای پیچیده درون `ProjectPages.tsx` و `PageDetail.tsx` به یک service مرکزی منتقل می‌شوند.
 
 ### راهنمای پیاده‌سازی فنی
+۱. `src/services/analysis/analysisService.ts` بساز با این توابع:
+   - `startProjectAnalysis(projectId, model, mode: 'all' | 'pending')` — معادل `handleRunAnalysis` فعلی.
+   - `runSinglePageAnalysis(projectId, pageId, model)` — معادل کلیک «بررسی با هوش مصنوعی» در `PageDetail.tsx`.
+   - `recomputeCandidates(projectId)` — معادل `handleComputeCandidates`.
+   - هر کدام از این توابع از repositories، scoringService، و QueueManager استفاده می‌کند.
 
-1. **`src/hooks/useAnalysisQueue.ts`** (فایل جدید):
-   ```ts
-   export function useAnalysisQueue(projectId: number) {
-     const queue = useLiveQuery(() => db.analysisQueue.where('project_id').equals(projectId).first());
-     
-     // شروع پردازش جدید
-     const startQueue = async (totalPages: number) => {
-       // پاک کردن queue قبلی
-       await db.analysisQueue.where('project_id').equals(projectId).delete();
-       
-       // ساخت queue جدید
-       await db.analysisQueue.add({
-         project_id: projectId,
-         status: 'pending',
-         current_page_index: 0,
-         total_pages: totalPages,
-         error_message: null,
-         started_at: new Date().toISOString(),
-         updated_at: new Date().toISOString()
-       });
-     };
-     
-     // ادامه پردازش متوقف‌شده
-     const resumeQueue = async () => { ... };
-     
-     // توقف موقت
-     const pauseQueue = async () => { ... };
-     
-     return { queue, startQueue, resumeQueue, pauseQueue };
-   }
-   ```
+۲. `src/pages/ProjectPages.tsx`:
+   - حذف منطق داخل `handleRunAnalysis`/`handleComputeCandidates`؛ فقط `await analysisService.startProjectAnalysis(...)` و toast.
+   - کامپوننت فقط با hooks (state UI) و service صحبت می‌کند.
 
-2. **`src/utils/queueProcessor.ts`** (فایل جدید):
-   ```ts
-   export async function processQueue(projectId: number) {
-     const apiKey = localStorage.getItem('LINKMESH_API_KEY');
-     if (!apiKey) throw new Error('کلید API وارد نشده است.');
-     
-     const queue = await db.analysisQueue.where('project_id').equals(projectId).first();
-     if (!queue || queue.status === 'completed') return;
-     
-     // آپدیت status به processing
-     await db.analysisQueue.update(queue.id!, { status: 'processing' });
-     
-     const pages = await db.pages.where('project_id').equals(projectId).toArray();
-     const project = await db.projects.get(projectId);
-     
-     // شروع از current_page_index
-     for (let i = queue.current_page_index; i < pages.length; i++) {
-       // چک کردن آیا pause شده
-       const currentQueue = await db.analysisQueue.get(queue.id!);
-       if (currentQueue?.status === 'paused') break;
-       
-       const page = pages[i];
-       
-       try {
-         // گرفتن کاندیداها
-         const candidateRecord = await db.candidates.where('source_page_id').equals(page.id!).first();
-         if (!candidateRecord) continue;
-         
-         const candidateList = JSON.parse(candidateRecord.candidate_list);
-         const categories = JSON.parse(page.categories);
-         
-         // ساخت پرامپت — بدون محدودیت تعداد
-         const prompt = buildSinglePagePrompt({ title: page.title, categories }, candidateList);
-         
-         // فراخوانی AI
-         const response = await callGemini(prompt, apiKey);
-         
-         // ذخیره فوری
-         await db.transaction('rw', db.results, db.analysisQueue, async () => {
-           await db.results.where('source_page_id').equals(page.id!).delete();
-           await db.results.add({
-             project_id: projectId,
-             source_page_id: page.id!,
-             recommended_links: JSON.stringify(response.selected_links || []),
-             is_manual_edit: false,
-             generated_at: new Date().toISOString()
-           });
-           
-           // آپدیت index
-           await db.analysisQueue.update(queue.id!, {
-             current_page_index: i + 1,
-             updated_at: new Date().toISOString()
-           });
-         });
-         
-         // مکث ۲ ثانیه
-         await new Promise(resolve => setTimeout(resolve, 2000));
-         
-       } catch (err) {
-         // ذخیره خطا و توقف
-         await db.analysisQueue.update(queue.id!, {
-           status: 'failed',
-           error_message: err.message,
-           updated_at: new Date().toISOString()
-         });
-         throw err;
-       }
-     }
-     
-     // تکمیل موفق
-     await db.analysisQueue.update(queue.id!, {
-       status: 'completed',
-       updated_at: new Date().toISOString()
-     });
-   }
-   ```
+۳. `src/pages/PageDetail.tsx`:
+   - معادل بالا برای handler تک‌صفحه‌ای.
 
-3. **`src/components/QueueProgress.tsx`** (فایل جدید):
-   - نوار پیشرفت visual
-   - نمایش: «صفحه ۱۵ از ۱۲۰ در حال پردازش...»
-   - دکمه‌های pause/resume/retry
+۴. `src/pages/Results.tsx`:
+   - منطق `downloadCSV` به `src/services/io/csvExporter.ts` منتقل شود.
 
-### محدودیت‌های این تسک
-- ✅ ذخیره بعد از هر صفحه — نه در انتها
-- ✅ مکث ۲ ثانیه بین هر call
-- ✅ از transaction برای ذخیره atomic استفاده کن
-- ⛔ هرگز بیش از یک صفحه در هر call نفرستی
-- ⛔ queue processor باید در یک useEffect اجرا شود، نه background worker
+### محدودیت‌ها
+- ✅ رفتار قابل مشاهده ثابت
+- ✅ کامپوننت‌ها بعد از این، هیچ `import { db }` نداشته باشند
+- ⛔ بدون تغییر در ظاهر صفحات
 
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/db.ts", "src/utils/gemini.ts", "src/pages/ProjectPages.tsx"]`
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/pages/ProjectPages.tsx", "src/pages/PageDetail.tsx", "src/pages/Results.tsx", "src/repositories/projectRepository.ts", "src/repositories/queueRepository.ts", "src/core/queue/QueueManager.ts", "src/utils/candidateStorage.ts"]`
+
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان با ابزار caling_tool فایل های کانتکست رو به صورت زنده فراخوانی کن و بخون و سپس کد این تسک رو بزن.
 
 ---
 
-## تسک ۸ — اتصال کامپوننت‌های UI به سیستم صف
+## تسک R10 — پاک‌سازی نهایی، حذف شیم‌ها و فایل‌های تکراری
 
 ### هدف
-اتصال صفحه ProjectPages به سیستم صف: نمایش پیشرفت، دکمه‌های کنترل، و اجرای پردازش.
+بعد از پایداری تسک‌های R1..R9، شیم‌های موقتی و کپی‌های تکراری حذف می‌شوند.
 
 ### راهنمای پیاده‌سازی فنی
+۱. پوشه ریشه‌ای `/utils/` (که حاوی نسخه قدیمی فایل‌هاست — `utils/scorer.ts`, `utils/queueProcessor.ts`, ...) را به‌طور کامل **حذف کن**. این فایل‌ها هیچ‌جا import نمی‌شوند (با grep تأیید کن).
 
-1. **`src/pages/ProjectPages.tsx`**:
-   
-   **اضافه کردن state و logic:**
-   ```ts
-   const { queue, startQueue, pauseQueue, resumeQueue } = useAnalysisQueue(projectId);
-   const [isProcessing, setIsProcessing] = useState(false);
-   
-   // اجرای پردازش
-   useEffect(() => {
-     if (queue?.status === 'pending' || queue?.status === 'processing') {
-       setIsProcessing(true);
-       processQueue(projectId)
-         .catch(console.error)
-         .finally(() => setIsProcessing(false));
-     }
-   }, [queue?.status]);
-   ```
+۲. شیم‌های re-export در `src/utils/` که در تسک‌های قبلی گذاشته شده بودند:
+   - برای هر کدام، grep بزن و مطمئن شو که هیچ فایلی از مسیر قدیمی import نمی‌کند.
+   - **اگر هیچ مصرف‌کننده‌ای نداشت**، فایل را حذف کن.
+   - **اگر مصرف‌کننده داشت**، آن importها را به مسیر جدید آپدیت کن، سپس شیم را حذف کن.
+   - این شامل: `src/utils/queueProcessor.ts`, `src/utils/gemini.ts`, `src/utils/csvParser.ts`, `src/utils/scorer.ts` (شیم), `src/utils/idfCalculator.ts` (شیم).
+   - **استثنا:** `src/utils/safeJson.ts`, `src/utils/titleSimilarity.ts`, `src/utils/candidateStorage.ts`, `src/utils/scorer.test.ts` در همان مکان باقی می‌مانند (utilities واقعی).
 
-   **دکمه «تحلیل هوشمند همه صفحات»:**
-   ```tsx
-   <Button
-     onClick={async () => {
-       // اول امتیازدهی الگوریتمی
-       await computeAndStoreCandidates(projectId, pages, weightsRecord, project.scoring_mode);
-       // شروع صف
-       await startQueue(pages.length);
-     }}
-     disabled={isProcessing}
-   >
-     {isProcessing ? 'در حال پردازش...' : 'تحلیل هوشمند همه صفحات'}
-   </Button>
-   ```
+۳. فایل کپی مرجع `/scorer.ts` در ریشه پروژه را **دست نزن**؛ این متعلق به کاربر است و او خودش حذف می‌کند.
 
-   **بخش نمایش پیشرفت:**
-   ```tsx
-   {queue && queue.status !== 'completed' && (
-     <QueueProgress
-       current={queue.current_page_index}
-       total={queue.total_pages}
-       status={queue.status}
-       error={queue.error_message}
-       onPause={pauseQueue}
-       onResume={resumeQueue}
-     />
-   )}
-   ```
+۴. اجرای typecheck نهایی: `pnpm exec tsc --noEmit` (یا معادل با package manager پروژه).
 
-2. **آپدیت کردن وضعیت هر صفحه در لیست:**
-   - اگر برای آن صفحه result وجود دارد: آیکون چک سبز
-   - اگر در حال پردازش است (index فعلی): آیکون spinner
-   - اگر هنوز نشده: بدون آیکون
+### محدودیت‌ها
+- ✅ بعد از این تسک، هیچ import کوچک‌ترین خطا نداشته باشد
+- ✅ هیچ‌جا `import { db } from ...` در `src/pages/` یا `src/components/` نباشد
+- ⛔ کپی مرجع `/scorer.ts` ریشه دست‌نخورده باقی بماند
 
-### محدودیت‌های این تسک
-- ✅ پردازش در useEffect باشد
-- ✅ UI باید real-time آپدیت شود (با useLiveQuery)
-- ⛔ پردازش نباید صفحه را block کند
-- ⛔ اگر کاربر صفحه را ببندد و برگردد، باید وضعیت درست نمایش داده شود
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/utils/queueProcessor.ts", "src/utils/gemini.ts", "src/utils/csvParser.ts", "src/utils/scorer.ts", "src/utils/idfCalculator.ts", "src/App.tsx", "package.json"]`
 
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/pages/ProjectPages.tsx", "src/hooks/useAnalysisQueue.ts", "src/utils/queueProcessor.ts", "src/components/QueueProgress.tsx"]`
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان با ابزار caling_tool فایل های کانتکست رو به صورت زنده فراخوانی کن و بخون و سپس کد این تسک رو بزن.
 
 ---
 
-## تسک ۹ — آپدیت صفحات Home و Results
+## ترتیب اجرا (الزامی، غیرقابل موازی‌سازی)
 
-### هدف
-آپدیت کردن صفحات موجود برای کار با سیستم جدید: تغییر لینک‌ها، نمایش وضعیت پردازش، و اطمینان از یکپارچگی UX.
+```
+R1 (Repositories)
+  └→ R2 (Gemini Client) ── R3 (CSV+Zod) ── R4 (Core scorer move)
+                                                  └→ R5 (Web Worker)
+                                                         └→ R6 (Queue split)
+                                                                └→ R7 (Auto-Resume)
+                                                                     └→ R8 (Slim hooks)
+                                                                          └→ R9 (Service layer)
+                                                                               └→ R10 (Cleanup)
+```
 
-### راهنمای پیاده‌سازی فنی
-
-1. **`src/pages/Home.tsx`**:
-   - تغییر دکمه «مشاهده نتایج»: ابتدا به `/project/:id` برود (لیست صفحات)
-   - اضافه کردن نمایش وضعیت پردازش اگر queue فعال است
-   - اضافه کردن لینک مستقیم به Results (خروجی نهایی)
-
-2. **`src/pages/Results.tsx`**:
-   - حذف منطق `?analyze=true` — تحلیل در صفحه جدید انجام می‌شود
-   - این صفحه فقط نمایش نتایج نهایی است
-   - اضافه کردن لینک برگشت به ProjectPages
-
-3. **`src/pages/Config.tsx`**:
-   - تغییر دکمه «شروع تحلیل»: به جای Results، به ProjectPages برود
-   - اضافه کردن دکمه «محاسبه کاندیداها» (اجرای امتیازدهی الگوریتمی)
-
-4. **`src/App.tsx` — Sidebar**:
-   - بررسی و اطمینان از درست بودن لینک‌ها
-
-### محدودیت‌های این تسک
-- ✅ UX باید روان و قابل فهم باشد
-- ✅ کاربر نباید گیج شود بین صفحات مختلف
-- ⛔ منطق پردازش AI از Results حذف شود
-
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/pages/Home.tsx", "src/pages/Results.tsx", "src/pages/Config.tsx", "src/App.tsx"]`
+R2, R3, R4 می‌توانند مستقل اجرا شوند ولی همگی به R1 وابسته‌اند.
 
 ---
 
-## تسک ۱۰ — تست نهایی و رفع باگ
+## معیار پذیرش کل فاز
 
-### هدف
-تست کامل سیستم جدید و اطمینان از عملکرد صحیح تمام قسمت‌ها.
-
-### چک‌لیست تست
-
-**فلوی اصلی:**
-- [ ] آپلود CSV و ساخت پروژه جدید
-- [ ] تنظیم وزن‌ها و ذخیره
-- [ ] محاسبه کاندیداها (امتیازدهی الگوریتمی)
-- [ ] مشاهده لیست صفحات و کاندیداهای هر کدام
-- [ ] تحلیل تکی یک صفحه با AI
-- [ ] تحلیل کلی همه صفحات با صف
-- [ ] توقف و ادامه دادن صف
-- [ ] ویرایش دستی لینک‌های یک صفحه
-- [ ] مشاهده نتایج نهایی
-- [ ] Export به CSV
-
-**سناریوهای edge-case:**
-- [ ] قطع شدن اینترنت وسط پردازش
-- [ ] تمام شدن توکن API وسط پردازش
-- [ ] پروژه بدون هیچ result
-- [ ] صفحه بدون هیچ کاندیدای مشابه (تمام تگ‌ها null)
-
-**عملکرد:**
-- [ ] پردازش ۱۰۰ صفحه بدون هنگ کردن UI
-- [ ] صف به درستی resume می‌شود
-
-### محدودیت‌های این تسک
-- ✅ تمام console.log‌های debug حذف شوند
-- ✅ تمام متن‌های UI فارسی باشند
-- ⛔ هیچ تغییر ساختاری جدید — فقط رفع باگ
-
-`CONTEXT_FILES: ["Docks/PROJECT.md", "Docks/ARCHITECTURE.md", "src/App.tsx"]`
-
----
-
----
-
-## تسک ۱۱ — آپدیت موتور امتیازدهی به الگوریتم هوشمند چند لایه
-
-### هدف
-جایگزینی الگوریتم ساده وزن‌دار با سیستم امتیازدهی پنج‌لایه که منطق تخصصی تور مسافرتی را درک می‌کند.
-
-### خلاصه الگوریتم (برای AI کدنویس)
-الگوریتم جدید یک سیستم **امتیازدهی چند لایه** است:
-1. **Pillar Rule**: اگر کاندیدا صفحه دسته‌ی ۱ مقصد است → **امتیاز ۱۰۰۰** (همیشه رتبه اول)
-2. **وزن‌های پایه**: مقصد=+100، زمان ماه=+60، فصل=+30، مبدأ=+50، هتل=+30، کشور مشترک=+20
-3. **ماتریس زمان**: ماه بعد=+40، همان فصل=+25، آخر فصل→فصل بعد=+20
-4. **ماتریس جغرافیایی**: مقصد متفاوت + کشور مشترک + زمان مشابه → +45
-5. **ماتریس بودجه**: ارزان↔لوکس = جریمه -50؛ هم‌کلاس = بونوس +20
-6. **ماتریس هتل Fallback**: هتل خاص داری ولی match نشد → ستاره‌ای=+15، هتل دیگر=+5
-7. **ماتریس مبدأ**: تطابق مبدأ = +50؛ تفاوت وسیله نقلیه **هیچ جریمه‌ای** ندارد
-
-### وضعیت
-✅ **پیاده‌سازی شده** — `src/utils/scorer.ts` بازنویسی شد.
-
-### فایل‌های تغییر یافته
-- `src/utils/scorer.ts` — بازنویسی کامل با توابع ماتریس مستقل
-
-### نکات مهم backward compatibility
-- `computeScore` همان signature را دارد اما پارامترهای `weights` و `mode` دیگر استفاده نمی‌شوند (نگه داشته شده‌اند تا کد قدیمی crash نکند)
-- `findTopCandidates` و `computeAllCandidates` و `CandidateWithTags` بدون تغییر هستند
-- پارامتر `sourceTitle` و `candidateTitle` به `computeScore` اضافه شده برای تشخیص مبدأ از عنوان
-
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/utils/scorer.ts", "src/constants/categories.ts"]`
-
----
-
-## خلاصه تغییرات نسبت به سیستم قبلی
-
-| قبلی | جدید |
-|---|---|
-| همه صفحات یکجا به AI | صفحه‌به‌صفحه با صف |
-| ذخیره در انتها | ذخیره دانه‌به‌دانه |
-| بدون قابلیت resume | از همان جا ادامه |
-| بدون ویرایش دستی | ویرایش دستی کامل |
-| یک صفحه Results | صفحه جزئیات هر صفحه |
-| بدون نمایش تگ مشترک | نمایش تگ‌های مشترک |
-| امتیازدهی ساده وزن‌دار | الگوریتم چند لایه با Pillar Rule و ماتریس‌های هوشمند |
+1. هیچ `import { db } from` در پوشه‌های `src/pages/` و `src/components/` وجود ندارد.
+2. باز کردن یک پروژه با ۱۰۰۰+ صفحه باعث UI Freeze نمی‌شود (دکمه‌ها responsive).
+3. خروجی Dexie (`candidates`، `results`) بعد از اجرای تحلیل با نسخه قبل از ریفکتور **بایت-به-بایت یکسان** است.
+4. تست `src/utils/scorer.test.ts` (یا معادل منتقل‌شده) pass می‌شود.
+5. `tsc --noEmit` بدون خطا.
+6. تست دستی: قطع کردن اینترنت در میان پردازش → نمایش backoff → بازگشتن اینترنت → ادامه طبیعی صف.
+7. بستن تب در میان پردازش → باز کردن دوباره → نمایش وضعیت paused با پیام واضح.

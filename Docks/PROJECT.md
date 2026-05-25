@@ -14,6 +14,15 @@
 
 ---
 
+## فاز فعلی: **ریفکتور معماری (Layering Refactor)**
+
+> فاز ۱ (ساخت ویژگی‌ها) ۱۰۰٪ کامل است. اکنون وارد **فاز ۱.۵ — ریفکتور بدون تغییر رفتار** می‌شویم. هدف: جدا کردن لایه‌ها، رفع UI Freeze، و آماده‌سازی برای مقیاس چند هزار صفحه.
+
+### قانون مطلق این فاز
+**الگوریتم `scorer.ts` و خروجی عددی آن تحت هیچ شرایطی تغییر نمی‌کند.** یک کپی مرجع از فایل توسط کاربر در `/scorer.ts` (ریشه پروژه) قرار داده شده تا در هر تسک با آن مقایسه شود. هر تغییر در ضرایب، توابع، یا ترتیب لایه‌های امتیازدهی = **شکست تسک**.
+
+---
+
 ## پشته تکنولوژی (Tech Stack)
 
 | لایه | ابزار |
@@ -24,10 +33,13 @@
 | فونت | Vazirmatn (Google Fonts) |
 | دیتابیس | Dexie.js v4 (wrapper روی IndexedDB مرورگر) |
 | پارس CSV | Papa Parse v5 |
-| هوش مصنوعی | Gemini API — مدل‌های `gemini-3.1-flash-lite` (پیش‌فرض) / `gemini-3-flash-preview` / `gemini-2.5-flash-lite` |
+| اعتبارسنجی | **Zod** (افزوده در فاز ریفکتور برای ورودی CSV و پاسخ Gemini) |
+| پردازش سنگین | **Web Worker** (افزوده در فاز ریفکتور برای scorer/idf) |
+| هوش مصنوعی | Gemini API — `gemini-3.1-flash-lite` / `gemini-3-flash-preview` / `gemini-2.5-flash-lite` |
 | مدیریت state | React useState + useContext (بدون کتابخانه خارجی) |
 | روتینگ | React Router v6 |
 | آیکون‌ها | Lucide React |
+| انیمیشن | motion/react |
 
 ---
 
@@ -37,32 +49,41 @@
 
 | ممنوع | دلیل / جایگزین |
 |---|---|
-| Firebase، Supabase، هر backend خارجی | پروژه کاملاً client-side است؛ از Dexie.js استفاده کن |
-| `sql.js` یا `@sqlite.org/sqlite-wasm` | Dexie.js کافی است و پیچیدگی WASM لازم نیست |
-| Redux، Zustand، MobX | از React useState/useContext استفاده کن |
-| Styled-components، CSS Modules، inline style | فقط Tailwind CSS کلاس مجاز است |
-| هر مدل Gemini غیر از `gemini-3-flash-preview` | برای کنترل هزینه — مدل ثابت است |
-| ذخیره API Key در Dexie یا کد | فقط `localStorage` برای API Key |
-| ارسال همه صفحات یکجا به Gemini | پردازش صفحه‌به‌صفحه با صف و ذخیره دانه‌دانه الزامی است |
-| محدودیت تعداد لینک (max_links) | AI تمام لینک‌های مرتبط را انتخاب می‌کند — بدون محدودیت عددی |
-| `axios` | از fetch native مرورگر استفاده کن |
-| `moment.js` یا `date-fns` | از `new Date().toISOString()` استفاده کن |
-| کامنت‌گذاری به انگلیسی در کد | تمام کامنت‌ها فارسی باشند |
+| **تغییر منطق scorer.ts** | الگوریتم نهال‌گشت است؛ فقط ممکن است جابه‌جا شود نه ویرایش |
+| **دسترسی مستقیم به `db.*` از داخل کامپوننت/هوک UI** | فقط از طریق `src/repositories/*` |
+| **اجرای computeAllCandidates روی Main Thread** | از طریق Web Worker اجرا شود |
+| **منطق بیزینسی داخل کامپوننت React** | کامپوننت‌ها Dumb باشند؛ منطق در `src/services/*` |
+| Firebase، Supabase، هر backend خارجی | پروژه کاملاً client-side است |
+| `sql.js`، `@sqlite.org/sqlite-wasm` | Dexie کافی است |
+| Redux، Zustand، MobX | فقط useState/useContext |
+| Styled-components، CSS Modules، inline style | فقط Tailwind |
+| ذخیره API Key در Dexie یا state | فقط `localStorage` با کلید `LINKMESH_API_KEY` |
+| ارسال همه صفحات یکجا به Gemini | پردازش صفحه‌به‌صفحه با صف |
+| محدودیت تعداد لینک (max_links) | AI تمام لینک‌های مرتبط را انتخاب می‌کند |
+| `axios` | fetch native |
+| `moment.js` / `date-fns` | `new Date().toISOString()` |
+| کامنت‌گذاری انگلیسی در کد | تمام کامنت‌ها فارسی |
+| **کتابخانه drag-and-drop** | پیاده‌سازی دستی با بالا/پایین |
+| **هر کتابخانه concurrency** (p-queue, bullmq...) | QueueCoordinator دستی نوشته می‌شود |
 
 ---
 
 ## محدودیت‌های فازبندی
 
-### فاز ۱ (این پروژه — در حال ساخت)
-- ورودی فقط از طریق آپلود دستی CSV
-- تحلیل AI روی متادیتای ۱۸ ستون دسته‌بندی
-- امتیازدهی درون‌برنامه‌ای بدون AI (پیدا کردن top 20 کاندیدا)
-- تحلیل AI دانه‌به‌دانه با صف و ذخیره‌سازی فوری
-- صفحه جزئیات هر صفحه با قابلیت ویرایش دستی
-- خروجی: export CSV / کپی به کلیپ‌بورد
+### فاز ۱ — ساخت ویژگی‌ها (تکمیل شده ✅)
+تمام ۱۱ تسک قبلی tasks.md پیاده‌سازی شد.
+
+### فاز ۱.۵ — ریفکتور لایه‌ای (در حال انجام)
+- جدا کردن لایه‌ها: UI / State / Coordinator / Algorithm / Infrastructure
+- خروج پردازش‌های سنگین از Main Thread با Web Worker
+- ساخت Repository Pattern روی Dexie
+- مقاوم‌سازی Gemini در برابر 429 با Exponential Backoff
+- مقاوم‌سازی Queue در برابر بسته شدن تب (Auto-Resume)
+- اعتبارسنجی ورودی CSV با Zod
+- شکستن `useAnalysisQueue` خداگونه به هوک‌های هدفمند
 
 ### فاز ۲ (آینده — اکنون لمس نشود)
-- کراولر خودکار برای استخراج تگ‌ها از سایت
+- کراولر خودکار
 - چند کاربر / چند workspace
 - ذخیره‌سازی ابری
 
@@ -70,7 +91,7 @@
 
 ## قوانین UI/UX
 
-- تمام متن‌های UI فارسی هستند
-- جهت صفحه RTL است (`dir="rtl"`)
-- هیچ عنصری انگلیسی به کاربر نشان داده نمی‌شود (به جز نام ابزار "LinkMesh")
-- طراحی تمیز و حرفه‌ای با رنگ اصلی emerald
+- تمام متن‌های UI فارسی
+- جهت صفحه RTL (`dir="rtl"`)
+- هیچ متن انگلیسی به کاربر نمایش داده نمی‌شود (به جز نام "LinkMesh")
+- طراحی تمیز و حرفه‌ای با رنگ اصلی emerald/blue
