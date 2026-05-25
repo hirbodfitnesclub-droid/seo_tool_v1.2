@@ -222,7 +222,7 @@
 ### هدف
 وقتی کاربر در میان پردازش تب را می‌بندد و دوباره باز می‌کند، صف‌هایی که status='processing' دارند ولی updated_at آن‌ها قدیمی است باید به وضعیت 'paused' تبدیل شوند تا کاربر بتواند آگاهانه resume کند.
 
-### راهنمای پیاده‌سازی فنی
+### راهنمای پیاده‌سازی فن��
 ۱. `src/repositories/queueRepository.ts` (از تسک R1) — متد `findInterrupted()` را پیاده کن:
    - تمام رکوردهای `status === 'processing'` که `updated_at` آن‌ها بیش از ۳۰ ثانیه از زمان فعلی فاصله دارد را بازگرداند.
 
@@ -390,3 +390,135 @@ R2, R3, R4 می‌توانند مستقل اجرا شوند ولی همگی به
 - نحوه ذخیره‌سازی Dexie (تراکنش‌های تودرتو یا سربار حجیم).
 - Re-render های کشنده در لایه React (مثلاً هوک‌های متصل به دیتابیس).
 - رفتار Vite در کلاینت برای اجرای Web Worker.
+
+---
+
+## تسک R12 (بهینه‌سازی ریشه‌ای) — حذف گلوگاه IPC و یکپارچه‌سازی ورکر
+
+### تحلیل معماری (Root Cause)
+
+پس از بازبینی کامل مسیر داغ (`computeAndStoreCandidates` → ورکر → `bulkAdd`)، چهار گلوگاه قطعی شناسایی شد. R11 فقط لایه CPU را بهینه کرد ولی **گلوگاه واقعی در IPC و Worker Spawning است** نه CPU.
+
+| # | گلوگاه | محل | تاثیر تخمینی |
+|---|---|---|---|
+| A | اسپاون دو ورکر متوالی (IDF و Candidates) | `candidateStorage.ts` | ۴–۱۰ ثانیه در dev |
+| B | چسبیدن `categories` کامل به هر کاندیدا → IPC غول‌پیکر | `scorer.ts` خط ~۱۱۶۸ | ۲–۵ ثانیه structured-clone |
+| C | `JSON.stringify` ۵۰۰۰‌بار روی main thread با داده آلوده B | `candidateStorage.ts` | ۱–۳ ثانیه فریز |
+| D | chunk=100 با `setTimeout(0)` در CSV | `csvParser.ts` | ۲۰۰ms اضافی |
+
+### هدف
+رساندن زمان «آپلود → ورود به پروژه» و «بررسی الگوریتم» به زیر ۲ ثانیه برای پروژه‌های ۵۰۰۰ صفحه‌ای، **بدون یک کاراکتر تغییر در منطق scorer**.
+
+### قانون مطلق
+> الگوریتم scorer و خروجی عددی آن مطلقاً تغییر نمی‌کند. تنها چیزی که از خروجی scorer **حذف** می‌شود فیلد `categories` آبجکت کاندیدا است — این فیلد در `TaskExecutor.executePage` و `PageDetail` همین حالا هم از طریق `allPages.find(...)` یا `pageRepository.getById` از منبع اصلی غنی‌سازی می‌شود، پس حذفش از payload کاندیدا هیچ اثر رفتاری ندارد.
+
+### راهنمای پیاده‌سازی فنی (دقیق و گام‌به‌گام)
+
+#### گام ۱ — حذف `categories` از خروجی scorer (گلوگاه B)
+فایل: `src/core/scoring/scorer.ts`
+
+در تابع `computeAllCandidates` (حدود خط ۱۱۵۹–۱۱۶۹)، در map نهایی، فیلد `categories: cat` را **حذف کن**. خروجی هر کاندیدا باید این فیلدها را داشته باشد و فقط همین‌ها:
+```
+page_id, title, score, rawScore, matched_tags, matchedTags, origin_bonus, destination_bonus
+```
+
+دلیل: این فیلد در ادامه مسیر (TaskExecutor و PageDetail) از منبع اصلی دوباره خوانده می‌شود. نگه داشتنش در کاندیدا یعنی ۲۵۰هزار کپی آبجکت در structured-clone و در JSON دیتابیس.
+
+در `findTopCandidates` هم (حدود خط ۱۱۰۰–۱۱۱۰) دقیقاً همین کار را بکن — `categories: cat` را حذف کن.
+
+تایپ `CandidateWithTags` در همان فایل: فیلد `categories?` را به فیلدی **اختیاری و deprecated** نگه دار (برای backward compatibility با کدهایی که شاید بخوانند) ولی **هیچ‌کجا مقدار نده**.
+
+#### گام ۲ — یکپارچه‌سازی دو فراخوانی ورکر در یک Job (گلوگاه A)
+فایل: `src/workers/scoringWorker.ts`
+
+یک message type جدید اضافه کن: `COMPUTE_ALL`. وقتی این type دریافت شد:
+1. اول `computeIDFMap(payload.pages)` را اجرا کن
+2. بعد `computeAllCandidates(payload.pages)` را اجرا کن
+3. در یک postMessage هر دو خروجی را بازگردان:
+```ts
+self.postMessage({
+  type: 'DONE_ALL',
+  payload: {
+    idfMap,
+    candidates: candidatesArrayWithSlice50
+  }
+});
+```
+type‌های قبلی `COMPUTE`، `COMPUTE_CANDIDATES`، `COMPUTE_IDF` را نگه دار (شکستن سازگاری ممنوع).
+
+فایل: `src/services/scoring/scoringService.ts`
+
+یک تابع جدید `computeAllInWorker(pages): Promise<{ idfMap, candidatesMap }>` اضافه کن که فقط یک‌بار `new ScoringWorker()` کند، یک پیام بفرستد، نتیجه را پارس کند، و worker را terminate کند. توابع `computeCandidatesInWorker` و `computeIDFInWorker` فعلی حذف نمی‌شوند (deprecated می‌مانند).
+
+فایل: `src/utils/candidateStorage.ts`
+
+به‌جای دو فراخوانی متوالی `computeIDFInWorker` و `computeCandidatesInWorker`، یک‌بار `computeAllInWorker(pages)` صدا بزن. ترتیب بعدی (ذخیره IDF → clear candidates → bulkAdd) ثابت می‌ماند.
+
+#### گام ۳ — bulkAdd درون transaction واحد (گلوگاه E + پایداری)
+فایل: `src/utils/candidateStorage.ts`
+
+`idfRepository.upsert(...)` و `candidateRepository.clearByProject(...)` و `candidateRepository.bulkAdd(...)` را در یک `db.transaction('rw', [db.idfCache, db.candidates], async () => { ... })` بپیچ. این کار:
+- تعداد notification های Dexie را به یک‌بار کاهش می‌دهد (یک‌بار re-render در main thread)
+- اتمیک می‌شود (یا همه ذخیره یا هیچ‌کدام)
+
+**هشدار**: چون `idfRepository.upsert` خودش یک transaction داخلی دارد، باید این transaction داخلی را حذف کنی یا یک نسخه «بدون-transaction» از upsert (مثلاً `upsertInTx`) به repository اضافه کنی و در candidateStorage از آن استفاده کنی. روش پیشنهادی: یک تابع جدید `upsertInTx(projectId, idfJson)` به `idfRepository` اضافه کن که فرض می‌کند داخل یک transaction باز است.
+
+#### گام ۴ — افزایش chunk size در CSV (گلوگاه D)
+فایل: `src/services/io/csvParser.ts`
+
+مقدار `chunkSize = 100` را به `chunkSize = 1000` تغییر بده. Zod `safeParse` در همین مقیاس هم زیر ۵۰ms اجرا می‌شود و event loop به اندازه کافی تنفس می‌کند.
+
+#### گام ۵ — Pre-warm worker (اختیاری ولی توصیه‌شده)
+فایل: `src/main.tsx` (یا `src/App.tsx` در یک useEffect یک‌بار)
+
+```ts
+// پیش‌گرم‌کردن کامپایل ورکر در dev mode تا اولین استفاده سریع باشد
+import('./workers/scoringWorker?worker').catch(() => {});
+```
+این کار module graph ورکر را در بک‌گراند به‌محض لود اپ کامپایل می‌کند.
+
+#### گام ۶ — Memo کردن `useLiveQuery` در ProjectPages (گلوگاه E)
+فایل: `src/pages/ProjectPages.tsx`
+
+سه `useLiveQuery` (queue، candidatesCount، results) باعث می‌شود هر تغییر Dexie کل صفحه را rerender کند. در حین `clearByProject` + `bulkAdd` چند notification پشت سر هم می‌خورد. راه‌حل:
+
+- `QueueProgress` و `PageListItem` همین حالا داخل کامپوننت جدا هستند — مطمئن شو `React.memo` روی هردو فعال است.
+- آرایه `paginatedPages` و `stats` و `filteredPages` همگی در `useMemo` هستند — نگاه کن dependency arrayشان درست باشد.
+- این گام «دیفنسیو» است: لازم نیست تغییر اساسی بدهی، فقط مطمئن شو سه کامپوننت سنگین (QueueProgress، PageListItem، CandidateCard) با `memo` پوشانده شده‌اند.
+
+### معیار پذیرش R12
+
+۱. روی یک CSV ۵۰۰۰ ردیفی:
+   - زمان «انتخاب فایل → ورود به صفحه Config» باید **زیر ۳ ثانیه** باشد (قبل از این تسک: ۲۰–۴۰ ثانیه).
+   - زمان کلیک «بررسی الگوریتم» تا اتمام تحلیل باید **زیر ۲ ثانیه** باشد.
+۲. خروجی عددی `scorer.ts` بایت‌به‌بایت یکسان است (تست `scorer.test.ts` pass می‌شود).
+۳. فقط یک‌بار `new ScoringWorker()` به‌ازای هر اجرای `computeAndStoreCandidates`.
+۴. payload structured-clone از ورکر به main حداکثر ~۱۰ مگابایت (قبل: ۱۰۰–۵۰۰ مگابایت).
+۵. در هیچ کاندیدای ذخیره‌شده در Dexie، فیلد `categories` وجود ندارد.
+۶. `tsc --noEmit` بدون خطا.
+
+### محدودیت‌ها (Anti-patterns برای این تسک)
+- ⛔ تغییر هیچ ضریب، تابع، یا ترتیب لایه‌های امتیازدهی در scorer
+- ⛔ افزودن کتابخانه جدید
+- ⛔ حذف توابع قبلی ورکر (`COMPUTE`, `COMPUTE_IDF`) — backward compat لازم است
+- ⛔ تغییر signature های public تابع `computeAndStoreCandidates`
+- ⛔ تغییر فرمت ذخیره `candidates.candidate_list` (همان JSON آرایه می‌ماند، فقط فیلد `categories` داخلش حذف می‌شود)
+- ✅ حذف `categories` از خروجی scorer مجاز است چون رفتار پایین‌دستی به آن وابسته نیست (با Grep تایید شده)
+- ✅ افزایش chunkSize از 100 به 1000 مجاز است
+
+### بررسی Grep قبل از پیاده‌سازی (الزامی)
+کدنویس باید قبل از حذف `categories` از scorer، این grep ها را اجرا کند تا اطمینان حاصل کند هیچ مصرف‌کننده‌ای از `candidate.categories` (نه از `page.categories`) وجود ندارد:
+```
+grep -rn "\.categories" src/ --include="*.ts" --include="*.tsx"
+```
+موارد مشروع (که `page.categories` می‌خوانند نه `candidate.categories`):
+- `TaskExecutor.ts` خط ~۵۰: `fullPage.categories` ← OK، از صفحه می‌خواند نه از کاندیدا
+- `analysisService.runSinglePageAnalysis` خط ~۹۰: `fullPage.categories` ← OK
+- `PageDetail.tsx`: `page.categories` ← OK
+- `promptBuilder.ts`: `sourcePage.categories` ← OK، از سورس می‌خواند
+
+اگر کدنویس کشف کرد جایی **مستقیماً** `candidate.categories` می‌خواند، باید آن نقطه را به lookup از `pageRepository.getById(cand.page_id)` تغییر دهد (مشابه الگوی موجود در `TaskExecutor`).
+
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "Docks/CURRENT_TASK.md", "src/core/scoring/scorer.ts", "src/workers/scoringWorker.ts", "src/services/scoring/scoringService.ts", "src/utils/candidateStorage.ts", "src/services/io/csvParser.ts", "src/repositories/idfRepository.ts", "src/repositories/candidateRepository.ts", "src/core/queue/TaskExecutor.ts", "src/services/analysis/analysisService.ts", "src/pages/PageDetail.tsx", "src/pages/ProjectPages.tsx", "src/main.tsx", "src/db.ts"]`
+
+> **یادآوری حیاتی:** قبل از تغییر scorer، فایل `/scorer.ts` (کپی مرجع کاربر) را با `src/core/scoring/scorer.ts` خط‌به‌خط diff بگیر. بعد از تغییر هم، فقط و فقط فیلد `categories: cat` باید از دو نقطه (در `findTopCandidates` و `computeAllCandidates`) حذف شده باشد. سایر کاراکترها دست‌نخورده باقی بمانند.

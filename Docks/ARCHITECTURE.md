@@ -288,15 +288,32 @@ self.onmessage = (e) => {
 // import با ?worker سینتکس Vite
 import ScoringWorker from '../../workers/scoringWorker?worker';
 
-export async function computeCandidatesInWorker(pages) {
+// نسخه legacy (نگه‌داری شده برای backward compat)
+export async function computeCandidatesInWorker(pages) { /* ... */ }
+export async function computeIDFInWorker(pages) { /* ... */ }
+
+// 🔴 نسخه بهینه شده (R12) — یک‌بار اسپاون، هر دو نتیجه را در یک پیام برمی‌گرداند
+export async function computeAllInWorker(pages): Promise<{ idfMap, candidatesMap }> {
   return new Promise((resolve, reject) => {
     const w = new ScoringWorker();
-    w.onmessage = (e) => { resolve(e.data.payload); w.terminate(); };
+    w.onmessage = (e) => {
+      if (e.data.type === 'DONE_ALL') {
+        const { idfMap, candidates } = e.data.payload;
+        resolve({ idfMap, candidatesMap: new Map(candidates) });
+        w.terminate();
+      }
+    };
     w.onerror = reject;
-    w.postMessage({ type: 'COMPUTE', payload: { pages } });
+    w.postMessage({ type: 'COMPUTE_ALL', payload: { pages } });
   });
 }
 ```
+
+### قاعده طلایی IPC (R12)
+> هیچ آبجکت تکراری در payload خروجی ورکر قرار نمی‌گیرد. به‌خصوص فیلد `categories` در داخل آبجکت کاندیدا **ممنوع** است — این داده در همین حالا هم در main thread از طریق `pageRepository.getById` یا `allPages.find` از منبع اصلی غنی‌سازی می‌شود.
+
+### قاعده طلایی Dexie Notifications (R12)
+> چند عملیات نوشتنی متوالی روی Dexie که در یک flow بیزینسی هستند **باید** در یک `db.transaction(...)` واحد بسته شوند. در غیر این صورت هر عملیات یک notification جدا تولید می‌کند که در main thread re-render های زنجیره‌ای می‌سازد.
 
 ---
 
