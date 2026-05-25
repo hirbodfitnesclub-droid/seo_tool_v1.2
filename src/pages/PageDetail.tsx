@@ -1,10 +1,11 @@
 import React, { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { db } from '../db';
 import { useProject } from '../hooks/useProject';
-import { buildSinglePagePrompt } from '../utils/gemini';
-import { callGemini } from '../utils/gemini';
+import * as pageRepository from '../repositories/pageRepository';
+import * as candidateRepository from '../repositories/candidateRepository';
+import * as resultRepository from '../repositories/resultRepository';
+import * as analysisService from '../services/analysis/analysisService';
 import { safeJsonParse } from '../utils/safeJson';
 import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
@@ -27,9 +28,9 @@ export default function PageDetail() {
   const pgId = parseInt(pageId || '0');
 
   const { project, loading: projectLoading } = useProject(pId);
-  const page = useLiveQuery(() => db.pages.get(pgId));
-  const candidateRec = useLiveQuery(() => db.candidates.where('source_page_id').equals(pgId).first());
-  const result = useLiveQuery(() => db.results.where('source_page_id').equals(pgId).first());
+  const page = useLiveQuery(() => pageRepository.getById(pgId), [pgId]);
+  const candidateRec = useLiveQuery(() => candidateRepository.getByPage(pgId), [pgId]);
+  const result = useLiveQuery(() => resultRepository.getByPage(pgId), [pgId]);
   const { showToast } = useToast();
 
   const [selectedLinks, setSelectedLinks] = useState<any[]>([]);
@@ -68,28 +69,7 @@ export default function PageDetail() {
   const handleAIAnalysis = async () => {
     setAnalyzing(true);
     try {
-      // غنی‌سازی کاندیداها به صورت بلادرنگ از روی جدول صفحات دیتابیس برای فرستادن اطلاعات کامل تگ‌ها به هوش مصنوعی
-      const top30 = candidateList.slice(0, 30);
-      const enrichedCandidates = await Promise.all(top30.map(async (cand: any) => {
-        const fullPage = await db.pages.get(cand.page_id);
-        if (fullPage) {
-          try {
-            return {
-              ...cand,
-              categories: typeof fullPage.categories === 'string'
-                ? JSON.parse(fullPage.categories)
-                : fullPage.categories
-            };
-          } catch {
-            return { ...cand, categories: fullPage.categories };
-          }
-        }
-        return cand;
-      }));
-
-      const prompt = buildSinglePagePrompt({ title: page!.title, categories: page!.categories }, enrichedCandidates);
-      const response = await callGemini(prompt, 'gemini-3.1-flash-lite');
-      const newLinks = response.selected_links || [];
+      const newLinks = await analysisService.runSinglePageAnalysis(pId, pgId, 'gemini-3.1-flash-lite');
       
       setSelectedLinks(newLinks);
       setIsUnsaved(true);
@@ -104,16 +84,13 @@ export default function PageDetail() {
 
   const handleSaveManual = async () => {
     try {
-      await db.transaction('rw', [db.results], async () => {
-        await db.results.where('source_page_id').equals(pgId).delete();
-        await db.results.add({
-          project_id: pId,
-          source_page_id: pgId,
-          source_title: page!.title,
-          recommended_links: JSON.stringify(selectedLinks),
-          is_manual_edit: true,
-          generated_at: new Date().toISOString()
-        });
+      await resultRepository.upsert({
+        project_id: pId,
+        source_page_id: pgId,
+        source_title: page!.title,
+        recommended_links: JSON.stringify(selectedLinks),
+        is_manual_edit: true,
+        generated_at: new Date().toISOString()
       });
       setIsUnsaved(false);
       showToast({ type: 'success', message: 'تغییرات شما با موفقیت در بانک پیشرفته نتایج ثبت شد.' });

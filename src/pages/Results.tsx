@@ -8,6 +8,7 @@ import EmptyState from '../components/ui/EmptyState';
 import Breadcrumb from '../components/Breadcrumb';
 import { useDebounce } from '../hooks/useDebounce';
 import { safeJsonParse } from '../utils/safeJson';
+import { exportResultsToCSV } from '../services/io/csvExporter';
 import { 
   BarChart2, Search, Download, ChevronDown, ChevronUp, 
   LayoutDashboard, CheckCircle, ArrowRight, FileText
@@ -50,25 +51,7 @@ export default function Results() {
   }, [parsedResults]);
 
   const downloadCSV = () => {
-    if (parsedResults.length === 0) return;
-    
-    let csvContent = "\ufeff"; // BOM for UTF-8 Support
-    csvContent += "صفحه منبع,صفحه مقصد,دلیل انتخاب,وضعیت ویرایش\n";
-    
-    parsedResults.forEach(r => {
-      r.links.forEach((l: any) => {
-        csvContent += `"${r.source_title}","${l.title}","${l.reason}","${r.is_manual_edit ? 'دستی' : 'هوشمند'}"\n`;
-      });
-    });
-
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.setAttribute("href", url);
-    link.setAttribute("download", `LinkMesh_Results_${project?.name}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+    exportResultsToCSV(project?.name || 'project', parsedResults);
   };
 
   if (loading) return <div className="flex justify-center py-20"><Spinner size="lg" /></div>;

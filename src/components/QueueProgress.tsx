@@ -13,7 +13,7 @@ interface QueueProgressProps {
   onRetry: () => void;
 }
 
-export const QueueProgress: React.FC<QueueProgressProps> = ({
+export const QueueProgress: React.FC<QueueProgressProps> = React.memo(({
   current, total, status, error, onPause, onResume, onRetry
 }) => {
   const percentage = Math.round((current / total) * 100) || 0;
@@ -99,11 +99,14 @@ export const QueueProgress: React.FC<QueueProgressProps> = ({
             <CheckCircle size={20} className="shrink-0" />
             <div>
                <p className="font-bold text-sm">بهینه‌سازی با موفقیت پایان یافت</p>
-               <p className="text-xs opacity-70 mt-1">تمام صفحات با موفقیت پردازش شدند. اکنون می‌توانید خروجی سئو را دریافت کنید.</p>
+               <p className="text-xs opacity-70 mt-1">تمام صفحات با موفقیت پردازش شدند. اکنون می‌توانید خروچی سئو را دریافت کنید.</p>
             </div>
           </motion.div>
         )}
       </div>
     </motion.div>
   );
-};
+});
+
+QueueProgress.displayName = 'QueueProgress';
+

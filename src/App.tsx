@@ -10,8 +10,12 @@ import PageDetail from './pages/PageDetail';
 import { Network } from 'lucide-react';
 import { ToastProvider } from './contexts/ToastContext';
 import { ToastContainer } from './components/ui/Toast';
+import { useQueueAutoResume } from './hooks/useQueueAutoResume';
 
 export default function App() {
+  // اجرای پایش خودکار بازنشانی صف‌های ناتمام در زمان بالا آمدن تب
+  useQueueAutoResume();
+
   return (
     <ToastProvider>
       <BrowserRouter>

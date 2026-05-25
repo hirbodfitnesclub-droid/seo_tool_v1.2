@@ -2,7 +2,8 @@
 import React, { useState } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useNavigate } from 'react-router-dom';
-import { db } from '../db';
+import * as projectRepository from '../repositories/projectRepository';
+import * as pageRepository from '../repositories/pageRepository';
 import { Button } from '../components/ui/Button';
 import { Spinner } from '../components/ui/Spinner';
 import { Plus } from 'lucide-react';
@@ -12,7 +13,7 @@ import ConfirmDialog from '../components/ConfirmDialog';
 
 export default function Home() {
   const navigate = useNavigate();
-  const projects = useLiveQuery(() => db.projects.orderBy('created_at').reverse().toArray());
+  const projects = useLiveQuery(() => projectRepository.listOrderedByCreatedAtDesc());
   const [deleteId, setDeleteId] = useState<number | null>(null);
 
   // Batch query to calculate count of pages for each project to improve performance
@@ -21,7 +22,7 @@ export default function Home() {
     if (!projects) return counts;
     for (const p of projects) {
       if (p.id) {
-        counts.set(p.id, await db.pages.where('project_id').equals(p.id).count());
+        counts.set(p.id, await pageRepository.countByProject(p.id));
       }
     }
     return counts;
@@ -29,14 +30,7 @@ export default function Home() {
 
   const handleDelete = async () => {
     if (!deleteId) return;
-    await db.transaction('rw', [db.projects, db.pages, db.weights, db.results, db.candidates, db.analysisQueue], async () => {
-      await db.projects.delete(deleteId);
-      await db.pages.where('project_id').equals(deleteId).delete();
-      await db.weights.where('project_id').equals(deleteId).delete();
-      await db.results.where('project_id').equals(deleteId).delete();
-      await db.candidates.where('project_id').equals(deleteId).delete();
-      await db.analysisQueue.where('project_id').equals(deleteId).delete();
-    });
+    await projectRepository.deleteProjectCascade(deleteId);
     setDeleteId(null);
   };
 

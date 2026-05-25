@@ -1,11 +1,14 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { db } from '../db';
 import { useProject } from '../hooks/useProject';
 import { useAnalysisQueue } from '../hooks/useAnalysisQueue';
-import { processQueue } from '../utils/queueProcessor';
-import { computeAndStoreCandidates } from '../utils/candidateStorage';
+import { useQueueStatus } from '../hooks/useQueueStatus';
+import { runQueue as processQueue } from '../core/queue/QueueCoordinator';
+import * as analysisService from '../services/analysis/analysisService';
+import * as candidateRepository from '../repositories/candidateRepository';
+import * as resultRepository from '../repositories/resultRepository';
+import { PageListItem } from '../components/PageListItem';
 import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
 import { Spinner } from '../components/ui/Spinner';
@@ -27,6 +30,7 @@ export default function ProjectPages() {
   
   const { project, pages, weights, loading } = useProject(id);
   const { queue, startQueue, pauseQueue, resumeQueue } = useAnalysisQueue(id);
+  const queueStatus = useQueueStatus(id);
   const { showToast } = useToast();
   
   const [searchTerm, setSearchTerm] = useState('');
@@ -36,7 +40,7 @@ export default function ProjectPages() {
   const [scoringStatus, setScoringStatus] = useState<string | null>(null);
   const processingRef = useRef(false);
 
-  const candidatesCount = useLiveQuery(() => db.candidates.where('project_id').equals(id).count());
+  const candidatesCount = useLiveQuery(() => candidateRepository.countByProject(id), [id]);
   
   const [showSetup, setShowSetup] = useState(false);
   const [selectedModel, setSelectedModel] = useState('gemini-3.1-flash-lite');
@@ -45,9 +49,9 @@ export default function ProjectPages() {
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 10;
 
-  // اجرای پروسسور صف با حل Race Condition
+  // اجرای پروسسور صف با حل Race Condition بر پایه استعلام بهینه وضعیت تغییرات صف
   useEffect(() => {
-    if ((queue?.status === 'processing' || queue?.status === 'pending') && !processingRef.current) {
+    if ((queueStatus === 'processing' || queueStatus === 'pending') && !processingRef.current) {
       processingRef.current = true;
       setIsProcessing(true);
       processQueue(id)
@@ -59,12 +63,12 @@ export default function ProjectPages() {
           processingRef.current = false;
           setIsProcessing(false);
         });
-    } else if (queue?.status !== 'processing' && queue?.status !== 'pending') {
+    } else if (queueStatus !== 'processing' && queueStatus !== 'pending') {
       setIsProcessing(false);
     }
-  }, [queue?.status, id, showToast]);
+  }, [queueStatus, id, showToast]);
 
-  const results = useLiveQuery(() => db.results.where('project_id').equals(id).toArray());
+  const results = useLiveQuery(() => resultRepository.listByProject(id), [id]);
 
   const stats = useMemo(() => {
     if (!pages || !results) return null;
@@ -96,12 +100,9 @@ export default function ProjectPages() {
 
   // متد دستی محاسبه کاندیداها
   const handleComputeCandidates = async () => {
-    if (!pages || !project) return;
     try {
       setScoringStatus('درحال امتیازدهی الگوریتمی کاندیداها...');
-      const weightMap: Record<string, number> = {};
-      weights.forEach(w => weightMap[w.category_name] = w.weight_value);
-      await computeAndStoreCandidates(id, pages, weightMap, project.scoring_mode || 'linear');
+      await analysisService.recomputeCandidates(id);
       setScoringStatus(null);
       showToast({ type: 'success', message: 'امتیازدهی کاندیداها با موفقیت انجام شد.' });
     } catch (err: any) {
@@ -112,45 +113,14 @@ export default function ProjectPages() {
   };
 
   const handleRunAnalysis = async () => {
-    if (!pages || !project) return;
-    
     try {
       setShowSetup(false);
       setIsProcessing(true);
-      
-      if (analysisMode === 'all') {
-        await db.results.where('project_id').equals(id).delete();
-        await db.analysisQueue.where('project_id').equals(id).modify({ current_page_index: 0 });
-      }
-
       setScoringStatus('درحال آماده‌سازی دیتابیس کاندیداها...');
       
-      const weightMap: Record<string, number> = {};
-      weights.forEach(w => weightMap[w.category_name] = w.weight_value);
+      await analysisService.startProjectAnalysis(id, selectedModel, analysisMode);
       
-      await computeAndStoreCandidates(id, pages, weightMap, project.scoring_mode);
       setScoringStatus(null);
-      
-      const existingQueue = await db.analysisQueue.where('project_id').equals(id).first();
-      if (existingQueue) {
-        await db.analysisQueue.update(existingQueue.id!, { 
-          selected_model: selectedModel,
-          status: 'pending',
-          current_page_index: analysisMode === 'all' ? 0 : existingQueue.current_page_index
-        });
-      } else {
-        await db.analysisQueue.add({
-          project_id: id,
-          status: 'pending',
-          current_page_index: 0,
-          total_pages: pages.length,
-          selected_model: selectedModel,
-          error_message: null,
-          started_at: new Date().toISOString(),
-          updated_at: new Date().toISOString()
-        });
-      }
-
       setIsProcessing(false);
     } catch (err: any) {
       console.error(err);
@@ -384,36 +354,18 @@ export default function ProjectPages() {
 
         <div className="divide-y divide-gray-50">
           {paginatedPages.map((page, index) => {
-            const hasResult = results?.some(r => r.source_page_id === page.id);
+            const hasResult = !!results?.some(r => r.source_page_id === page.id);
             const globalIndex = (currentPage - 1) * itemsPerPage + index;
             const isCurrent = queue?.status === 'processing' && queue.current_page_index === globalIndex;
 
             return (
-              <Link 
+              <PageListItem 
                 key={page.id} 
-                to={`/project/${id}/page/${page.id}`}
-                className={`flex items-center justify-between p-4 hover:bg-gray-50/70 transition-colors group ${isCurrent ? 'bg-blue-50/30' : ''}`}
-              >
-                <div className="flex items-center gap-3.5 min-w-0">
-                  <div className={`w-10 h-10 rounded-xl flex items-center justify-center shrink-0 border ${hasResult ? 'bg-green-50 border-green-100 text-green-600' : 'bg-gray-50 border-gray-100 text-gray-400'}`}>
-                    {isCurrent ? <Spinner size="sm" /> : <FileText size={18} />}
-                  </div>
-                  <div className="truncate">
-                    <h4 className="font-bold text-gray-800 text-sm truncate">{page.title}</h4>
-                    <div className="flex gap-2 mt-1">
-                       {hasResult && (
-                         <div className="flex items-center gap-1 text-[10px] text-green-600 font-bold">
-                            <CheckCircle size={10} />
-                            <span>تحلیل شده</span>
-                         </div>
-                       )}
-                    </div>
-                  </div>
-                </div>
-                <div className="flex items-center gap-3">
-                  <ChevronLeft className="text-gray-300 group-hover:text-blue-500 transition-colors shrink-0" size={18} />
-                </div>
-              </Link>
+                page={page}
+                projectId={id}
+                hasResult={hasResult}
+                isCurrent={isCurrent}
+              />
             );
           })}
           {filteredPages.length === 0 && (

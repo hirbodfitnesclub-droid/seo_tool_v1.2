@@ -1,52 +1,37 @@
 import { useLiveQuery } from 'dexie-react-hooks';
-import { db } from '../db';
+import * as queueRepository from '../repositories/queueRepository';
+import * as QueueManager from '../core/queue/QueueManager';
 
 /**
- * مدیریت وضعیت صف پردازش در دیتابیس
+ * مدیریت وضعیت صف پردازش بر پایه لایه‌های سرویس دهنده و مخازن داده
  */
 export function useAnalysisQueue(projectId: number) {
+  // استفاده از کلاینت ریپازیتوری لایه‌ای برای استعلام پویای دیتابیس
   const queue = useLiveQuery(
-    () => db.analysisQueue.where('project_id').equals(projectId).first(),
+    () => queueRepository.getByProject(projectId),
     [projectId]
   );
 
-  const startQueue = async (totalPages: number) => {
-    // پاک کردن وضعیت قبلی
-    await db.analysisQueue.where('project_id').equals(projectId).delete();
-    
-    // ایجاد صف جدید
-    return await db.analysisQueue.add({
-      project_id: projectId,
-      status: 'pending',
-      current_page_index: 0,
-      total_pages: totalPages,
-      error_message: null,
-      started_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    });
+  const startQueue = async (totalPages: number, model: string = 'gemini-3.1-flash-lite') => {
+    return QueueManager.start(projectId, totalPages, model);
   };
 
   const pauseQueue = async () => {
     if (queue?.id) {
-      await db.analysisQueue.update(queue.id, { 
-        status: 'paused',
-        updated_at: new Date().toISOString()
-      });
+      await QueueManager.markPaused(queue.id);
     }
   };
 
   const resumeQueue = async () => {
     if (queue?.id) {
-      await db.analysisQueue.update(queue.id, { 
-        status: 'processing',
-        updated_at: new Date().toISOString()
-      });
+      await QueueManager.markProcessing(queue.id);
     }
   };
 
   const resetQueue = async () => {
-    await db.analysisQueue.where('project_id').equals(projectId).delete();
+    await queueRepository.deleteByProject(projectId);
   };
 
   return { queue, startQueue, pauseQueue, resumeQueue, resetQueue };
 }
+

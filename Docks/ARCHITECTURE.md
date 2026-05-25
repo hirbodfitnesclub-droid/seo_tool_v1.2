@@ -1,367 +1,321 @@
-# ARCHITECTURE.md — لنگرگاه سیستمی
+# ARCHITECTURE.md — لنگرگاه سیستمی (نسخه ریفکتور لایه‌ای)
+
+> این سند معماری **هدف نهایی** فاز ۱.۵ ریفکتور را تعریف می‌کند. اسکیمای دیتابیس و الگوریتم scorer دست‌نخورده می‌ماند؛ ساختار فایل‌ها و جریان وابستگی‌ها بازسازی می‌شود.
 
 ---
 
-## اسکیمای دیتابیس (Dexie.js / IndexedDB)
+## ۱. معماری لایه‌ای (Layered Architecture)
 
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Layer 1 — UI (React Components)                            │
+│  src/pages/*, src/components/*                              │
+│  وظیفه: فقط نمایش. هیچ db.* یا منطق بیزینسی ندارد           │
+└──────────────────────┬──────────────────────────────────────┘
+                       │ فقط از طریق services و hooks
+┌──────────────────────▼──────────────────────────────────────┐
+│  Layer 2 — State (UI Hooks)                                 │
+│  src/hooks/*                                                │
+│  وظیفه: فقط state UI + اتصال به services/repositories      │
+│  ممنوع: انجام مستقیم API call یا منطق صف                   │
+└──────────────────────┬──────────────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────────────┐
+│  Layer 3 — Services (Use-Cases)                             │
+│  src/services/analysis/*, src/services/scoring/*            │
+│  وظیفه: ارکستراسیون use-case (مثل "اجرای تحلیل یک صفحه")    │
+└──────────────────────┬──────────────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────────────┐
+│  Layer 4 — Core Domain                                      │
+│  src/core/scoring/* (BLACK BOX — scorer.ts بدون تغییر)      │
+│  src/core/queue/* (QueueManager, Coordinator, TaskExecutor) │
+│  وظیفه: منطق خالص. هیچ وابستگی به مرورگر/Dexie/React        │
+└──────────────────────┬──────────────────────────────────────┘
+                       │
+┌──────────────────────▼──────────────────────────────────────┐
+│  Layer 5 — Infrastructure                                   │
+│  src/repositories/* (Dexie wrappers)                        │
+│  src/services/api/* (Gemini Client + Backoff)               │
+│  src/services/io/* (CSV Parser + Zod)                       │
+│  src/workers/* (Web Worker entry)                           │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### قواعد جریان وابستگی (الزامی)
+- لایه بالاتر فقط از لایه پایین‌تر import می‌کند، **هرگز بالعکس**.
+- Layer 4 (Core) هیچ import از Dexie، React، یا `window` ندارد → قابل اجرا در Web Worker.
+- Layer 1 (UI) **هرگز** `import { db }` نمی‌کند.
+
+---
+
+## ۲. اسکیمای دیتابیس (Dexie — بدون تغییر)
+
+نسخه فعلی `version(3)` با ۷ جدول حفظ می‌شود:
+- `projects`, `pages`, `weights`, `candidates`, `results`, `analysisQueue`, `idfCache`
+
+اسکیمای کامل و فیلدها در نسخه قبلی این سند (پایین این فایل در بخش "ضمیمه — اسکیما") حفظ شده است. **هیچ migration جدید در این فاز.**
+
+---
+
+## ۳. درخت فایل هدف (بعد از ریفکتور)
+
+```
+src/
+├── App.tsx
+├── main.tsx
+├── db.ts                              ← فقط تعریف schema، بدون منطق
+│
+├── pages/                             ← Layer 1 (Dumb)
+│   ├── Home.tsx
+│   ├── NewProject.tsx
+│   ├── Config.tsx
+│   ├── ProjectPages.tsx               ← [ویرایش] منطق به analysisService منتقل
+│   ├── PageDetail.tsx                 ← [ویرایش] منطق به analysisService منتقل
+│   └── Results.tsx
+│
+├── components/                        ← Layer 1
+│   ├── ui/*
+│   ├── QueueProgress.tsx              ← React.memo اضافه شود
+│   ├── CandidateCard.tsx
+│   ├── ProjectCard.tsx
+│   ├── ProjectEmptyState.tsx
+│   ├── ConfirmDialog.tsx
+│   └── Breadcrumb.tsx
+│
+├── hooks/                             ← Layer 2 (فقط state UI)
+│   ├── useProject.ts                  ← [ویرایش] از projectRepository بخواند
+│   ├── useAnalysisQueue.ts            ← [ویرایش] فقط getter/control، نه پردازش
+│   ├── useQueueStatus.ts              ← [جدید] selector برای جلوگیری از re-render
+│   ├── useQueueAutoResume.ts          ← [جدید] mark interrupted as paused
+│   ├── useDebounce.ts
+│   └── useToast.ts
+│
+├── services/                          ← Layer 3
+│   ├── analysis/
+│   │   ├── analysisService.ts         ← [جدید] runSinglePage, runAllPages, resume
+│   │   └── candidateService.ts        ← [جدید] wrapper روی scoring worker
+│   ├── api/
+│   │   ├── geminiClient.ts            ← [جدید] fetch + exponential backoff (429/5xx)
+│   │   ├── promptBuilder.ts           ← [جدید] buildSinglePagePrompt (منتقل از gemini.ts)
+│   │   └── geminiSchema.ts            ← [جدید] Zod schema پاسخ AI
+│   ├── io/
+│   │   ├── csvParser.ts               ← [ویرایش] Zod-based validation
+│   │   └── csvExporter.ts             ← [جدید] منطق export از Results.tsx منتقل
+│   └── scoring/
+│       └── scoringService.ts          ← [جدید] postMessage به Web Worker
+│
+├── core/                              ← Layer 4 (Pure, No-DOM, Worker-Safe)
+│   ├── scoring/
+│   │   ├── scorer.ts                  ← [انتقال — بدون تغییر منطق] از utils/
+│   │   └── idfCalculator.ts           ← [انتقال — بدون تغییر] از utils/
+│   └── queue/
+│       ├── QueueManager.ts            ← [جدید] فقط state transitions صف
+│       ├── TaskExecutor.ts            ← [جدید] اجرای یک صفحه (atomic)
+│       └── QueueCoordinator.ts        ← [جدید] حلقه پردازش + pause-check + sleep
+│
+├── repositories/                      ← Layer 5 (Dexie Wrappers)
+│   ├── projectRepository.ts           ← [جدید]
+│   ├── pageRepository.ts              ← [جدید]
+│   ├── weightRepository.ts            ← [جدید]
+│   ├── candidateRepository.ts        ← [جدید]
+│   ├── resultRepository.ts            ← [جدید]
+│   ├── queueRepository.ts             ← [جدید]
+│   └── idfRepository.ts               ← [جدید]
+│
+├── workers/                           ← Layer 5
+│   └── scoringWorker.ts               ← [جدید] entry برای Vite worker
+│
+├── utils/                             ← فقط ابزارهای generic
+│   ├── safeJson.ts
+│   ├── titleSimilarity.ts
+│   ├── scorer.ts                      ← [حذف بعد از انتقال — شیم re-export موقت]
+│   ├── idfCalculator.ts               ← [حذف بعد از انتقال — شیم re-export موقت]
+│   ├── queueProcessor.ts              ← [ویرایش به شیم] فقط delegate به QueueCoordinator
+│   ├── gemini.ts                      ← [ویرایش به شیم] re-export از services/api
+│   ├── candidateStorage.ts            ← [ویرایش] از scoringService استفاده کند
+│   └── csvParser.ts                   ← [ویرایش به شیم] re-export
+│
+├── constants/
+│   ├── categories.ts
+│   ├── theme.ts
+│   └── timeNeighbors.ts
+│
+└── contexts/
+    └── ToastContext.tsx
+
+scorer.ts                              ← [ریشه] کپی مرجع کاربر (دست نخورده)
+```
+
+### فایل‌های ریشه پروژه که حذف می‌شوند (تکراری با `src/utils/`)
+```
+utils/candidateStorage.ts
+utils/csvParser.ts
+utils/gemini.ts
+utils/idfCalculator.ts
+utils/queueProcessor.ts
+utils/safeJson.ts
+utils/scorer.test.ts
+utils/scorer.ts
+utils/titleSimilarity.ts
+```
+این پوشه `/utils` ریشه به نظر از یک کپی قدیمی به‌جا مانده و در آخرین تسک حذف می‌شود.
+
+---
+
+## ۴. جریان داده جدید (Refactored Data Flow)
+
+### اجرای صف AI (نمونه — مهم‌ترین جریان)
+
+```
+ProjectPages.tsx (UI)
+    │ کلیک «اجرای تحلیل»
+    ▼
+analysisService.startProjectAnalysis(projectId, model)
+    │
+    ├─→ candidateService.computeAndStore(projectId)
+    │       │
+    │       └─→ scoringService.compute(pages)
+    │               │ postMessage to Web Worker
+    │               ▼
+    │       [scoringWorker.ts]
+    │               │ computeIDFMap + computeAllCandidates (BLACK BOX)
+    │               ▼
+    │       candidateRepository.saveBatch(records)
+    │
+    └─→ queueRepository.create(projectId, totalPages)
+            │
+            ▼
+useAnalysisQueue (UI hook) → useEffect → QueueCoordinator.start(projectId)
+            │
+            ▼
+QueueCoordinator (Layer 4)
+    │ loop i = current_index..total:
+    │   ┌─ QueueManager.isPaused() → break
+    │   ├─ TaskExecutor.executePage(pageId)
+    │   │     │
+    │   │     ├─→ candidateRepository.getByPage(pageId)
+    │   │     ├─→ promptBuilder.buildSinglePagePrompt(...)
+    │   │     ├─→ geminiClient.call(prompt, model)  ← retry/backoff داخلی
+    │   │     └─→ resultRepository.save(...)  ← transaction
+    │   │
+    │   ├─ QueueManager.advance(i+1)
+    │   └─ sleep(2000)
+    │ on error: QueueManager.markFailed(err)
+    ▼
+QueueManager.markCompleted()
+```
+
+### اجرای resume خودکار بعد از بسته شدن تب
+```
+App.tsx → useQueueAutoResume()
+    │ on mount
+    ▼
+queueRepository.findInterrupted()  // status='processing' ولی update_at قدیمی
+    │
+    └─→ queueRepository.markPaused(queueId)
+        (کاربر دستی resume می‌کند تا کنترل دست او باشد)
+```
+
+---
+
+## ۵. اعتبارسنجی با Zod
+
+دو نقطه ورود داده با Zod محافظت می‌شود:
+
+### `services/io/csvParser.ts`
 ```ts
-// src/db.ts
-db.version(2).stores({
-  projects : '++id, name, created_at',
-  pages    : '++id, project_id, title',
-  weights  : '++id, project_id, category_name',
-  candidates: '++id, project_id, source_page_id', // جدول جدید: لیست ۲۰ کاندیدا
-  results  : '++id, project_id, source_page_id',
-  analysisQueue: '++id, project_id' // صف پردازش AI
-})
+const RowSchema = z.object({
+  'عنوان_H1': z.string().min(1),
+  // ۱۸ ستون دسته‌بندی به صورت optional nullable string
+  ...
+});
 ```
+اگر یک ردیف نامعتبر بود، با پیام خطای واضح skip می‌شود نه crash.
 
-### جدول `projects`
-| فیلد | نوع | توضیح |
-|---|---|---|
-| id | auto int PK | |
-| name | string | نام پروژه — مثلاً «نهال‌گشت ۱۴۰۵» |
-| created_at | ISO string | تاریخ ساخت |
-| scoring_mode | `'linear'` یا `'weighted'` | روش امتیازدهی |
-
-> **نکته:** فیلد `max_links` حذف شده. AI تمام لینک‌های مرتبط از بین ۲۰ کاندیدا را انتخاب می‌کند — بدون محدودیت عددی.
-
-### جدول `pages`
-| فیلد | نوع | توضیح |
-|---|---|---|
-| id | auto int PK | |
-| project_id | int FK → projects.id | |
-| title | string | مقدار ستون `عنوان_H1` از CSV |
-| categories | JSON string | آبجکت حاوی ۱۸ فیلد دسته‌بندی |
-
-**ساختار `categories` (JSON.stringify شده):**
-```json
-{
-  "قاره_یا_منطقه": "اوراسیا",
-  "کشور_مقصد": "ترکیه",
-  "جهت_در_منطقه": "مدیترانه",
-  "شهر_یا_جزیره_مقصد": "کوش آداسی",
-  "شهر_یا_استان_مبدا": null,
-  "نوع_تور": "تک مقصد",
-  "فصل_برگزاری": "تابستان",
-  "ماه_تقویمی_برگزاری": "تیر",
-  "تعطیلات_خاص_تقویمی": null,
-  "رویداد_یا_مناسبت_خاص": null,
-  "تم_یا_هدف_سفر": null,
-  "نوع_وسیله_نقلیه": "هوایی",
-  "نام_دقیق_هتل": null,
-  "تعداد_ستاره_هتل": null,
-  "برچسب_کلاسی_تور": null,
-  "پرسونای_مخاطب": null,
-  "وضعیت_ویزا": "بدون ویزا",
-  "نوع_سفر": "تفریحی، استراحت و ریلکسیشن"
-}
-```
-
-### جدول `weights`
-| فیلد | نوع | توضیح |
-|---|---|---|
-| id | auto int PK | |
-| project_id | int FK → projects.id | |
-| category_name | string | نام ستون دسته‌بندی |
-| weight_value | float (1-5) | وزن اختصاص‌داده‌شده |
-
-**وزن‌های پیش‌فرض:**
+### `services/api/geminiSchema.ts`
 ```ts
-{
-  'شهر_یا_جزیره_مقصد'   : 5,
-  'کشور_مقصد'           : 4,
-  'نوع_تور'             : 3,
-  'ماه_تقویمی_برگزاری'  : 3,
-  'فصل_برگزاری'         : 3,
-  'قاره_یا_منطقه'       : 2,
-  'جهت_در_منطقه'        : 2,
-  'تم_یا_هدف_سفر'       : 2,
-  'نوع_سفر'             : 2,
-  'شهر_یا_استان_مبدا'   : 1,
-  'تعطیلات_خاص_تقویمی'  : 1,
-  'رویداد_یا_مناسبت_خاص': 1,
-  'نوع_وسیله_نقلیه'     : 1,
-  'نام_دقیق_هتل'        : 1,
-  'تعداد_ستاره_هتل'     : 1,
-  'برچسب_کلاسی_تور'     : 1,
-  'پرسونای_مخاطب'       : 1,
-  'وضعیت_ویزا'          : 1,
-}
+const GeminiResponseSchema = z.object({
+  selected_links: z.array(z.object({
+    page_id: z.number(),
+    title: z.string(),
+    reason: z.string()
+  }))
+});
+```
+خروجی AI قبل از ذخیره در `results` validate می‌شود.
+
+---
+
+## ۶. مدیریت خطا در Gemini (Exponential Backoff)
+
+`services/api/geminiClient.ts` به این شکل کار می‌کند:
+
+```
+attempt = 0
+while attempt < 5:
+  response = fetch(...)
+  if response.ok: return parsed
+  if status == 429 or 5xx:
+    delay = min(60000, 2^attempt * 1000 + jitter)
+    await sleep(delay)
+    attempt++
+  else:
+    throw (non-retryable)
+throw "تعداد تلاش‌ها به حداکثر رسید"
 ```
 
-### جدول `candidates` (جدید — لیست ۲۰ کاندیدای هر صفحه)
-| فیلد | نوع | توضیح |
-|---|---|---|
-| id | auto int PK | |
-| project_id | int FK → projects.id | |
-| source_page_id | int FK → pages.id | صفحه‌ای که کاندیداها برایش محاسبه شده |
-| candidate_list | JSON string | آرایه ۲۰ کاندیدا (بدون AI) |
-| computed_at | ISO string | زمان محاسبه |
+---
 
-**ساختار `candidate_list`:**
-```json
-[
-  { "page_id": 42, "title": "تور مارماریس تابستان", "score": 15, "matched_tags": ["کشور_مقصد", "فصل_برگزاری"] }
-]
-```
+## ۷. Web Worker
 
-### جدول `results` (نتایج نهایی AI)
-| فیلد | نوع | توضیح |
-|---|---|---|
-| id | auto int PK | |
-| project_id | int FK → projects.id | |
-| source_page_id | int FK → pages.id | صفحه‌ای که لینک‌ها برایش پیشنهاد شده |
-| recommended_links | JSON string | آرایه لینک‌های پیشنهادی از AI |
-| is_manual_edit | boolean | آیا کاربر دستی ویرایش کرده؟ |
-| generated_at | ISO string | زمان تولید |
+### فایل `src/workers/scoringWorker.ts`
+```ts
+import { computeAllCandidates } from '../core/scoring/scorer';
+import { computeIDFMap } from '../core/scoring/idfCalculator';
 
-**ساختار `recommended_links`:**
-```json
-[
-  {
-    "page_id": 42,
-    "title": "تور مارماریس تابستان ۱۴۰۵",
-    "score": 11,
-    "reason": "هر دو تور ترکیه مدیترانه تابستانه هستند",
-    "is_manual": false
+self.onmessage = (e) => {
+  const { type, payload } = e.data;
+  if (type === 'COMPUTE') {
+    const candidates = computeAllCandidates(payload.pages);
+    self.postMessage({ type: 'DONE', payload: serializeMap(candidates) });
   }
-]
+};
 ```
 
-### جدول `analysisQueue` (صف پردازش AI)
-| فیلد | نوع | توضیح |
-|---|---|---|
-| id | auto int PK | |
-| project_id | int FK → projects.id | |
-| status | `'pending'` / `'processing'` / `'completed'` / `'failed'` | وضعیت صف |
-| current_page_index | int | ایندکس آخرین صفحه پردازش‌شده |
-| total_pages | int | تعداد کل صفحات |
-| error_message | string / null | پیام خطا اگر fail شد |
-| started_at | ISO string | زمان شروع |
-| updated_at | ISO string | آخرین به‌روزرسانی |
-
----
-
-## جریان داده (Data Flow)
-
-```
-                          ┌─────────────────────────────────────────────────────────────┐
-                          │                    User Flow                                 │
-                          └─────────────────────────────────────────────────────────────┘
-
-CSV آپلود
-    │
-    ▼
-Papa Parse → آرایه ردیف‌ها
-    │
-    ▼
-Dexie: projects.add() + pages.bulkAdd()
-    │
-    ▼
-Config Screen: scoring_mode + weights → Dexie: weights.bulkAdd()
-    │
-    ├───────────────────────────────────────────────────────────────────┐
-    │                                                                   │
-    ▼                                                                   ▼
-[مرحله اول: امتیازدهی داخلی - بدون AI]                    [صفحه لیست صفحات]
-    │                                                                   │
-    ▼                                                                   ▼
-scorer.ts → computeAllCandidates()                         کلیک روی هر صفحه
-    │                                                                   │
-    ▼                                                                   ▼
-برای هر صفحه: top 20 کاندیدا                              [صفحه جزئیات صفحه]
-    │                                                         /         \
-    ▼                                                        /           \
-Dexie: candidates.bulkAdd()                                 ▼             ▼
-    │                                                   [دکمه تکی    [ویرایش
-    │                                                    بررسی AI]    دستی]
-    └───────────────────────────────────────────────────────┘
-                                                            │
-                                                            ▼
-                          ┌─────────────────────────────────────────────────────────────┐
-                          │              مرحله دوم: پردازش AI                            │
-                          └─────────────────────────────────────────────────────────────┘
-
-                    ┌───────────────────┐         ┌───────────────────┐
-                    │   دکمه تکی        │         │   دکمه کلی        │
-                    │   (یک صفحه)       │         │   (همه صفحات)     │
-                    └────────┬──────────┘         └────────┬──────────┘
-                             │                             │
-                             ▼                             ▼
-                    فقط همان صفحه +               ایجاد analysisQueue
-                    ۲۰ کاندیدایش                  با status='pending'
-                             │                             │
-                             ▼                             ▼
-                    gemini.ts: buildSinglePrompt()     صف‌پردازی:
-                             │                      ┌──────────────────────────┐
-                             ▼                      │  برای هر صفحه:          │
-                    callGemini()                    │  1. صفحه i را بگیر       │
-                             │                      │  2. ۲۰ کاندیدا بفرست    │
-                             ▼                      │  3. جواب بگیر            │
-                    ذخیره در results                │  4. ذخیره در results     │
-                             │                      │  5. مکث ۲ ثانیه          │
-                             ▼                      │  6. update queue index   │
-                    نمایش نتیجه                     │  7. تکرار تا آخر         │
-                                                    └──────────────────────────┘
-                                                               │
-                                                               ▼
-                                                    اگر خطا یا قطع شد:
-                                                    queue.status = 'failed'
-                                                    queue.error_message = ...
-                                                               │
-                                                               ▼
-                                                    دفعه بعد: از current_page_index ادامه بده
-```
-
----
-
-## مسیرهای روتینگ
-
-| مسیر | کامپوننت | توضیح |
-|---|---|---|
-| `/` | `Home.tsx` | لیست پروژه‌ها |
-| `/new` | `NewProject.tsx` | آپلود CSV |
-| `/config/:projectId` | `Config.tsx` | تنظیمات امتیازدهی |
-| `/project/:projectId` | `ProjectPages.tsx` | **جدید:** لیست صفحات پروژه + دکمه تحلیل کلی |
-| `/project/:projectId/page/:pageId` | `PageDetail.tsx` | **جدید:** جزئیات یک صفحه + ویرایش دستی |
-| `/results/:projectId` | `Results.tsx` | خروجی نهایی + export |
-
----
-
-## درخت فایل (تغییرات جدید)
-
-فایل‌های جدید که باید ساخته شوند:
-```
-src/
-├── pages/
-│   ├── ProjectPages.tsx     ← [جدید] لیست صفحات + دکمه تحلیل کلی
-│   └── PageDetail.tsx       ← [جدید] جزئیات صفحه + ویرایش دستی
-│
-├── utils/
-│   ├── scorer.ts            ← [ویرایش] اضافه کردن matched_tags به خروجی
-│   └── gemini.ts            ← [ویرایش] اضافه کردن buildSinglePrompt()
-│
-├── components/
-│   ├── QueueProgress.tsx    ← [جدید] نمایش پیشرفت صف
-│   └── CandidateCard.tsx    ← [جدید] کارت نمایش کاندیدا
-│
-└── hooks/
-    └── useAnalysisQueue.ts  ← [جدید] مدیریت صف پردازش AI
-```
-
-فایل‌های موجود که ویرایش می‌شوند:
-```
-src/
-├── db.ts                    ← اضافه کردن جداول candidates و analysisQueue
-├── App.tsx                  ← اضافه کردن route‌های جدید
-└── pages/Home.tsx           ← لینک به صفحه ProjectPages
-```
-
----
-
-## منطق الگوریتم امتیازدهی (`scorer.ts`) — نسخه ۲
-
-### معماری کلی
-الگوریتم یک **سیستم امتیازدهی چند لایه** است، نه جمع ساده وزن‌دار. برای هر جفت (صفحه فعلی، کاندیدا) پنج لایه به ترتیب اجرا می‌شود و امتیازات جمع می‌شوند:
-
-```
-امتیاز نهایی = Pillar(1000?) + وزن‌پایه + بونوس_زمان + بونوس_جغرافیا + بونوس_بودجه + بونوس_هتل
-```
-
-### لایه ۱: Pillar Rule
+### فایل `src/services/scoring/scoringService.ts`
 ```ts
-if (isPillarPage(sourceCat, candidateCat, candidateTitle)) → score = 1000
-```
-صفحه دسته‌ی ۱ شناسایی می‌شود اگر: همان مقصد + بدون مبدأ در عنوان + بدون هتل خاص + بدون ماه خاص
+// import با ?worker سینتکس Vite
+import ScoringWorker from '../../workers/scoringWorker?worker';
 
-### لایه ۲: وزن‌های پایه (Base Scores)
-| موجودیت | تطابق کامل | توضیح |
-|---|---|---|
-| مقصد (شهر) | +100 | اگر شهر/جزیره یکی است |
-| کشور (بدون شهر مشترک) | +20 | پایه برای بونوس جغرافیایی |
-| زمان (ماه دقیق) | +60 | ماه تقویمی یکسان |
-| زمان (فصل) | +30 | فصل یکسان — fallback از ماه |
-| مبدأ | +50 | شهر/استان مبدأ یکسان |
-| هتل دقیق | +30 | نام هتل کاملاً یکسان |
-
-### لایه ۳: ماتریس زمان (Time Bonus)
-فقط اگر صفحه فعلی ماه خاص دارد:
-- کاندیدا = ماه بعد (مثل تیر→مرداد): **+40**
-- کاندیدا = همان فصل (ماه دیگر): **+25**
-- صفحه در ماه آخر فصل + کاندیدا در فصل بعدی: **+20**
-
-### لایه ۴: ماتریس جغرافیایی (Geo Expansion)
-فقط اگر مقصد متفاوت ولی کشور یکسان:
-- کاندیدا همان ماه یا فصل دارد: **+45** (جبرانی)
-- مثال: تور آنتالیا تیر → تور کوش‌آداسی تیر
-
-### لایه ۵: ماتریس بودجه (Budget Matrix)
-- صفحه ارزان + کاندیدا ۳ستاره: **+20**
-- صفحه ارزان + کاندیدا لوکس/۵ستاره: **-50**
-- صفحه لوکس + کاندیدا ۵ستاره: **+20**
-- صفحه لوکس + کاندیدا ارزان/۳ستاره: **-50**
-
-### لایه ۶: ماتریس هتل Fallback
-فقط اگر صفحه فعلی هتل خاص دارد و match نشد:
-- کاندیدا = فیلتر ستاره‌ای (مثل «هتل‌های ۵ ستاره»): **+15**
-- کاندیدا = هتل دیگر در همان مقصد: **+5**
-
-### قوانین Entity Parsing
-| موجودیت | نحوه تشخیص |
-|---|---|
-| مبدأ | وجود ` از ` (با فاصله دو طرف) در عنوان |
-| تور ترکیبی | `نوع_تور === 'ترکیبی'` |
-| هتل خاص | `نام_دقیق_هتل !== null` |
-| فیلتر ستاره | `تعداد_ستاره_هتل !== null && !hasSpecificHotel` |
-| وسیله نقلیه | **تغییر آن جریمه ندارد** — فقط مبدأ مهم است |
-
-```ts
-interface CandidateWithTags {
-  page_id: number;
-  title: string;
-  score: number;
-  matched_tags: string[]; // نام فارسی تگ‌های مشترک
+export async function computeCandidatesInWorker(pages) {
+  return new Promise((resolve, reject) => {
+    const w = new ScoringWorker();
+    w.onmessage = (e) => { resolve(e.data.payload); w.terminate(); };
+    w.onerror = reject;
+    w.postMessage({ type: 'COMPUTE', payload: { pages } });
+  });
 }
 ```
 
 ---
 
-## ساختار Prompt برای Gemini — تغییرات
+## ۸. نکات امنیتی (بدون تغییر)
 
-### Prompt برای یک صفحه (دکمه تکی):
-
-```
-SYSTEM:
-تو یک متخصص SEO هستی. وظیفه‌ات انتخاب بهترین لینک‌های داخلی است.
-
-USER:
-یک صفحه از سایت نهال‌گشت و ۲۰ صفحه کاندیدا برای لینک‌سازی داده شده.
-از بین این ۲۰ کاندیدا، دقیقاً ۵ صفحه برتر را انتخاب کن.
-
-معیار: شباهت معنایی، ارتباط موضوعی، و تکمیل‌کنندگی سفر کاربر.
-
-صفحه اصلی:
-- عنوان: تور مارماریس تابستان ۱۴۰۵
-- ویژگی‌ها: کشور=ترکیه، فصل=تابستان، نوع=تفریحی
-
-کاندیداها:
-1. تور کوش آداسی تابستان — امتیاز تگ: 15 — تگ‌های مشترک: کشور، فصل
-2. تور آنتالیا بهار — امتیاز تگ: 10 — تگ‌های مشترک: کشور
-...
-
-خروجی را فقط به صورت JSON خالص بده:
-{
-  "selected_links": [
-    { "page_id": 42, "title": "...", "reason": "..." }
-  ]
-}
-```
+- کلید Gemini API فقط در `localStorage` با کلید `LINKMESH_API_KEY`
+- در حال حاضر یک proxy روی `/api/gemini` (server.ts) وجود دارد که کلید را از env می‌خواند — این پابرجاست
+- در export، کلید در CSV نمی‌رود
 
 ---
 
-## نکات امنیتی
+## ضمیمه — اسکیمای کامل دیتابیس (مرجع)
 
-- کلید Gemini API **فقط** در `localStorage` با کلید `LINKMESH_API_KEY` ذخیره می‌شود
-- هیچ‌گاه API Key به Dexie یا state برنامه نوشته نمی‌شود
-- هنگام export، API Key در CSV وارد نمی‌شود
+اسکیمای جداول هیچ تغییری نمی‌کند. برای جزئیات کامل فیلدها به نسخه پیشین این سند (قبل از این به‌روزرسانی) در history Git مراجعه شود. خلاصه:
+
+- **projects**: id, name, created_at, scoring_mode
+- **pages**: id, project_id, title, categories (JSON)
+- **weights**: id, project_id, category_name, weight_value
+- **candidates**: id, project_id, source_page_id, candidate_list (JSON), computed_at
+- **results**: id, project_id, source_page_id, source_title, recommended_links (JSON), is_manual_edit, generated_at
+- **analysisQueue**: id, project_id, status, current_page_index, total_pages, selected_model, error_message, started_at, updated_at
+- **idfCache**: id, project_id, idf_map (JSON), computed_at

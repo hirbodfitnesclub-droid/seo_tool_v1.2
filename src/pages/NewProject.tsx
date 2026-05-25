@@ -1,7 +1,7 @@
 import React, { useState, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { db } from '../db';
-import { parseCSV, ParseResult } from '../utils/csvParser';
+import { parseCSV, ParseResult } from '../services/io/csvParser';
 import { Button } from '../components/ui/Button';
 import { CATEGORIES } from '../constants/categories';
 import { computeAndStoreCandidates } from '../utils/candidateStorage';
