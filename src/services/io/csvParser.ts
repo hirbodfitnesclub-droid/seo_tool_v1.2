@@ -73,7 +73,7 @@ export const parseCSV = (file: File): Promise<ParseResult> => {
 
         const processData = async () => {
           if (errors.length === 0) {
-            const chunkSize = 100;
+            const chunkSize = 1000;
             for (let i = 0; i < data.length; i += chunkSize) {
               const chunk = data.slice(i, i + chunkSize);
               

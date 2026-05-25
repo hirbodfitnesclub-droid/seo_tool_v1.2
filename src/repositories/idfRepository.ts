@@ -23,13 +23,22 @@ export async function getByProject(projectId: number): Promise<IDFCacheRecord | 
  */
 export async function upsert(projectId: number, idfMapJson: string): Promise<void> {
   await db.transaction('rw', db.idfCache, async () => {
-    // پاک کردن تکرارهای قبلی برای جلوگیری از انباشت داده‌های نامعتبر
-    await db.idfCache.where('project_id').equals(projectId).delete();
-    // ثبت رکورد کش جدید همراه با زمان دقیق اتمام محاسبات
-    await db.idfCache.add({
-      project_id: projectId,
-      idf_map: idfMapJson,
-      computed_at: new Date().toISOString()
-    });
+    await upsertInTx(projectId, idfMapJson);
+  });
+}
+
+/**
+ * بروزرسانی یا درج جدید مقدار نگاشت IDF برای یک پروژه معین در داخل یک تراکنش موجود
+ * @param projectId شناسه عددی پروژه
+ * @param idfMapJson رشته JSON معتبر از شیء الگوی فرکانس کلمات (IDFMap)
+ */
+export async function upsertInTx(projectId: number, idfMapJson: string): Promise<void> {
+  // پاک کردن تکرارهای قبلی برای جلوگیری از انباشت داده‌های نامعتبر
+  await db.idfCache.where('project_id').equals(projectId).delete();
+  // ثبت رکورد کش جدید همراه با زمان دقیق اتمام محاسبات
+  await db.idfCache.add({
+    project_id: projectId,
+    idf_map: idfMapJson,
+    computed_at: new Date().toISOString()
   });
 }

@@ -23,7 +23,7 @@ interface CandidateCardProps {
   index?: number; // اضافه شدن ایندکس ردیف برای اولویت‌بندی ترتیبی مطمئن
 }
 
-export const CandidateCard: React.FC<CandidateCardProps> = ({ candidate, isSelected, onToggle, index }) => {
+export const CandidateCard: React.FC<CandidateCardProps> = React.memo(({ candidate, isSelected, onToggle, index }) => {
   // محاسبه درصد تشابه بر اساس امتیاز ۱ تا ۱۰
   const similarityPercent = Math.min(Math.round(candidate.score * 10), 100);
   
@@ -121,4 +121,6 @@ export const CandidateCard: React.FC<CandidateCardProps> = ({ candidate, isSelec
       </div>
     </motion.div>
   );
-};
+});
+
+CandidateCard.displayName = 'CandidateCard';

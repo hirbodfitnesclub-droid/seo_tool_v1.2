@@ -9,7 +9,20 @@ import { computeIDFMap } from '../core/scoring/idfCalculator';
 self.onmessage = (e: MessageEvent) => {
   const { type, payload } = e.data;
   try {
-    if (type === 'COMPUTE' || type === 'COMPUTE_CANDIDATES') {
+    if (type === 'COMPUTE_ALL') {
+      const idfMap = computeIDFMap(payload.pages);
+      const candidatesMap = computeAllCandidates(payload.pages);
+      const candidatesArray = Array.from(candidatesMap.entries()).map(([pageId, candidates]) => {
+        return [pageId, candidates.slice(0, 50)];
+      });
+      self.postMessage({
+        type: 'DONE_ALL',
+        payload: {
+          idfMap,
+          candidates: candidatesArray
+        }
+      });
+    } else if (type === 'COMPUTE' || type === 'COMPUTE_CANDIDATES') {
       const candidatesMap = computeAllCandidates(payload.pages);
       // تبدیل Map به Array و فیلتر کردن کاندیداها به برترین ۵۰ مورد در وب‌ورکر برای جلوگیری از OOM و فریز شدن مرورگر در serialization
       const candidatesArray = Array.from(candidatesMap.entries()).map(([pageId, candidates]) => {

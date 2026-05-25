@@ -75,3 +75,38 @@ export async function computeIDFInWorker(pages: PageLike[]): Promise<IDFMap> {
     }
   });
 }
+
+/**
+ * محاسبه همزمان IDF و کاندیداها در یک مرحله فرستادن پیام به وب‌ورکر بهینه شده (R12)
+ * @param pages لیست صفحات پروژه همراه با اطلاعات دسته‌بندی
+ * @returns پرامیس حاوی نقشه IDF و نگاشت کاندیداهای متناظر هر صفحه
+ */
+export async function computeAllInWorker(pages: any[]): Promise<{ idfMap: IDFMap; candidatesMap: Map<number, CandidateWithTags[]> }> {
+  return new Promise((resolve, reject) => {
+    try {
+      const worker = new ScoringWorker();
+
+      worker.onmessage = (e: MessageEvent) => {
+        const { type, payload, error } = e.data;
+        if (type === 'DONE_ALL') {
+          const { idfMap, candidates } = payload;
+          const candidatesMap = new Map<number, CandidateWithTags[]>(candidates);
+          resolve({ idfMap, candidatesMap });
+          worker.terminate();
+        } else if (type === 'ERROR') {
+          reject(new Error(error || 'خطای ناشناخته در محاسبات جامع ورکر'));
+          worker.terminate();
+        }
+      };
+
+      worker.onerror = (err) => {
+        reject(err);
+        worker.terminate();
+      };
+
+      worker.postMessage({ type: 'COMPUTE_ALL', payload: { pages } });
+    } catch (err) {
+      reject(err);
+    }
+  });
+}

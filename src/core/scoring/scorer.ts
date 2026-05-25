@@ -1097,7 +1097,7 @@ export function findTopCandidates(
   rawCandidates.sort((a, b) => b.result.score - a.result.score);
 
   // تبدیل به CandidateWithTags با امتیاز نرمالایز شده برای UI
-  const candidates: CandidateWithTags[] = rawCandidates.map(({ page, result, cat }) => ({
+  const candidates: CandidateWithTags[] = rawCandidates.map(({ page, result }) => ({
     page_id: (page as any).id!,
     title: page.title,
     score: normalizeScore(result.score),    // برای نمایش UI
@@ -1106,7 +1106,6 @@ export function findTopCandidates(
     matchedTags: result.matchedTags,
     origin_bonus: result.originBonus,
     destination_bonus: result.destinationBonus,
-    categories: cat,
   }));
 
   return candidates;
@@ -1156,7 +1155,7 @@ export function computeAllCandidates(
     rawCandidates.sort((a, b) => b.result.score - a.result.score);
 
     // تبدیل به CandidateWithTags با امتیاز نرمالایز شده برای UI
-    const candidates: CandidateWithTags[] = rawCandidates.map(({ id, title, result, cat }) => ({
+    const candidates: CandidateWithTags[] = rawCandidates.map(({ id, title, result }) => ({
       page_id: id,
       title,
       score: normalizeScore(result.score),
@@ -1165,7 +1164,6 @@ export function computeAllCandidates(
       matchedTags: result.matchedTags,
       origin_bonus: result.originBonus,
       destination_bonus: result.destinationBonus,
-      categories: cat,
     }));
 
     map.set(src.id, candidates);
