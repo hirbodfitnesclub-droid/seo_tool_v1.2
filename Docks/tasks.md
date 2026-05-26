@@ -222,7 +222,7 @@
 ### هدف
 وقتی کاربر در میان پردازش تب را می‌بندد و دوباره باز می‌کند، صف‌هایی که status='processing' دارند ولی updated_at آن‌ها قدیمی است باید به وضعیت 'paused' تبدیل شوند تا کاربر بتواند آگاهانه resume کند.
 
-### راهنمای پیاده‌سازی فن��
+### راهنمای پیاده‌سازی فن����
 ۱. `src/repositories/queueRepository.ts` (از تسک R1) — متد `findInterrupted()` را پیاده کن:
    - تمام رکوردهای `status === 'processing'` که `updated_at` آن‌ها بیش از ۳۰ ثانیه از زمان فعلی فاصله دارد را بازگرداند.
 
@@ -331,7 +331,7 @@
 
 ۳. فایل کپی مرجع `/scorer.ts` در ریشه پروژه را **دست نزن**؛ این متعلق به کاربر است و او خودش حذف می‌کند.
 
-۴. اجرای typecheck نهایی: `pnpm exec tsc --noEmit` (یا معادل با package manager پروژه).
+۴. اجرای typecheck نهایی: `pnpm exec tsc --noEmit` (یا معاد�� با package manager پروژه).
 
 ### محدودیت‌ها
 - ✅ بعد از این تسک، هیچ import کوچک‌ترین خطا نداشته باشد
@@ -433,3 +433,274 @@ R2, R3, R4 می‌توانند مستقل اجرا شوند ولی همگی به
 2. پروژه ۵۰۰۰ صفحه‌ای: UI freeze نمی‌شود (Worker مسیر).
 3. خروجی Dexie هر دو مسیر یکسان است.
 4. `tsc --noEmit` بدون خطا.
+
+---
+
+# فاز ۲ — توسعه ویژگی‌ها
+
+## قوانین مشترک تمام تسک‌های این فاز
+
+۱. **حق نداری هیچ کدی رو حدس بزنی؛ همین الان با ابزار caling_tool فایل های کانتکست رو به صورت زنده فراخوانی کن و بخون و سپس کد این تسک رو بزن.**
+
+۲. **خط قرمز مطلق:** `src/db.ts` لمس نمی‌شود. هیچ جدول/ایندکس/migration جدید. اسکیمای Dexie v3 ثابت است.
+
+۳. **خط قرمز مطلق:** `src/core/scoring/scorer.ts` و `src/core/scoring/idfCalculator.ts` لمس نمی‌شوند.
+
+۴. هیچ کتابخانه جدیدی اضافه نمی‌شود.
+
+۵. کامنت‌ها فارسی. متن UI فارسی. RTL.
+
+۶. لایه‌بندی پروژه (UI → Hooks → Services → Repositories → Dexie) رعایت شود. کامپوننت `import { db }` ندارد.
+
+---
+
+## تسک F1.1 — زیرساخت Reverse Index Service
+
+### هدف
+ساخت سرویس `inlinkGraphService` که یک Reverse Index in-memory از گراف لینک‌سازی پروژه می‌سازد و آن را با کش module-level + signature-based invalidation مدیریت می‌کند. این تسک هیچ UI تولید نمی‌کند؛ فقط زیرساخت داده.
+
+### راهنمای پیاده‌سازی فنی
+
+۱. **افزودن متد جدید به `src/repositories/candidateRepository.ts`:**
+   ```ts
+   /**
+    * دریافت تمام رکوردهای کاندیدا برای یک پروژه (برای ساخت Reverse Index)
+    */
+   export async function listByProject(projectId: number): Promise<CandidateRecord[]> {
+     return db.candidates.where('project_id').equals(projectId).toArray();
+   }
+   ```
+   ایندکس `project_id` از قبل در `db.ts` موجود است؛ بنابراین این کوئری بهینه است.
+
+۲. **ساخت فایل جدید `src/services/analysis/inlinkGraphService.ts`:**
+   - تایپ‌های صادر شده:
+     ```ts
+     export type InlinkOrigin = 'result' | 'candidate';
+     export interface InlinkSourceEntry {
+       sourcePageId: number;
+       sourceTitle: string;
+       rank: number;          // ۱-based ترتیب لینک در صفحه مبدأ
+       score?: number;        // فقط در مسیر candidate
+       matchedTags?: string[];// فقط در مسیر candidate
+       origin: InlinkOrigin;
+     }
+     export type InlinkIndex = Map<number, InlinkSourceEntry[]>;
+     ```
+   - کش module-level:
+     ```ts
+     interface CacheEntry {
+       index: InlinkIndex;
+       signature: string;
+       builtAt: number;
+       buildPromise?: Promise<InlinkIndex>; // برای جلوگیری از build همزمان دوبار
+     }
+     const cache = new Map<number, CacheEntry>();
+     ```
+   - تابع `computeSignature(projectId)`:
+     - `count(results) + ':' + count(candidates) + ':' + max(results.generated_at || '')`
+     - از `resultRepository.listByProject` و `candidateRepository.countByProject` استفاده کن. **برای max نیازی به scan کامل نیست**: یک `await db.results.where('project_id').equals(projectId).count()` و یک `db.results.where('project_id').equals(projectId).last()` کافی است (آخرین رکورد inserted = آخرین generated_at).
+     - **توجه:** برای جلوگیری از وابستگی مستقیم به `db`، یک متد کمکی به `resultRepository.ts` اضافه کن: `getLatestGeneratedAt(projectId): Promise<string | null>`.
+
+   - تابع اصلی:
+     ```ts
+     export async function getOrBuildIndex(projectId: number): Promise<InlinkIndex>
+     ```
+     - signature را محاسبه کن.
+     - اگر cache hit با signature یکسان → بازگشت `cache.index`.
+     - اگر `cache.buildPromise` موجود (در حال build) → همان promise را return کن.
+     - در غیر این صورت، یک `buildPromise` بساز و در cache ذخیره کن، سپس await و در پایان signature را تثبیت کن.
+
+   - تابع build داخلی:
+     ```ts
+     async function buildIndex(projectId: number): Promise<InlinkIndex>
+     ```
+     - `pages = await pageRepository.listByProject(projectId)` → ساخت `Map<pageId, title>` برای lookup.
+     - `results = await resultRepository.listByProject(projectId)` → ساخت `Set<sourcePageId>` صفحات دارای result.
+     - `candidates = await candidateRepository.listByProject(projectId)`.
+     - `index = new Map<number, InlinkSourceEntry[]>()`.
+     - حلقه روی همه pages با chunking:
+       ```ts
+       const CHUNK_SIZE = 100;
+       for (let i = 0; i < pages.length; i++) {
+         const sourceId = pages[i].id!;
+         const sourceTitle = pages[i].title;
+         // اگر در results باشد → از recommended_links بخوان (origin='result')
+         // در غیر اینصورت اگر در candidates باشد → از candidate_list بخوان (origin='candidate')
+         // برای هر link.page_id: index.get(targetId).push({...})
+         if (i % CHUNK_SIZE === 0 && i > 0) {
+           await new Promise(r => setTimeout(r, 0)); // تنفس به Event Loop
+         }
+       }
+       ```
+     - از `safeJsonParse` برای پارس امن استفاده شود.
+     - self-link حذف شود (`if (link.page_id === sourceId) continue`).
+     - برای جستجو `O(1)` سریع‌تر، از `resultsBySourceId = new Map<number, Result>()` استفاده کن.
+
+   - تابع‌های کمکی صادر شده:
+     ```ts
+     export async function getInlinksFor(projectId: number, targetPageId: number): Promise<InlinkSourceEntry[]>
+     export function invalidateProject(projectId: number): void
+     ```
+     - `getInlinksFor` ابتدا `getOrBuildIndex` را صدا می‌زند، سپس entries را برای `targetPageId` برمی‌گرداند، با مرتب‌سازی:
+       1. ابتدا `origin === 'result'`
+       2. سپس بر اساس `score` نزولی (undefined در آخر)
+       3. در نهایت `rank` صعودی به‌عنوان tie-breaker
+     - `invalidateProject(projectId)` فقط `cache.delete(projectId)` انجام می‌دهد. (در آینده توسط analysisService بعد از تحلیل صدا زده می‌شود — در این تسک فقط export کن.)
+
+۳. **هیچ تغییری در UI/Hooks/Components.** این تسک خالص infrastructure است.
+
+### محدودیت‌ها
+- ✅ هیچ تغییر در `db.ts`
+- ✅ هیچ ایندکس/جدول جدید
+- ✅ تمام کوئری‌ها از repositories (نه `import { db }` در service)
+- ⛔ بدون Web Worker
+- ⛔ بدون `useLiveQuery`
+
+### معیار پذیرش
+- `tsc --noEmit` بدون خطا.
+- یک تست دستی: در DevTools console فراخوانی `getOrBuildIndex(projectId)` در یک پروژه ۷۰۰ صفحه زیر ۲ ثانیه تمام شود و UI در طول build پاسخ‌گو باشد.
+
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "Docks/PROJECT.md", "src/db.ts", "src/repositories/candidateRepository.ts", "src/repositories/resultRepository.ts", "src/repositories/pageRepository.ts", "src/utils/safeJson.ts"]`
+
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان با ابزار caling_tool فایل های کانتکست رو به صورت زنده فراخوانی کن و بخون و سپس کد این تسک رو بزن.
+
+---
+
+## تسک F1.2 — هوک `useInlinkAnalytics` + اتصال به analysisService
+
+### هدف
+ساخت یک هوک React که Reverse Index را به‌صورت lazy و non-blocking برای یک `targetPageId` در دسترس قرار می‌دهد، و اتصال invalidation به نقاط تغییر داده.
+
+### راهنمای پیاده‌سازی فنی
+
+۱. **ساخت فایل جدید `src/hooks/useInlinkAnalytics.ts`:**
+   ```ts
+   export function useInlinkAnalytics(
+     projectId: number,
+     targetPageId: number
+   ): {
+     count: number;
+     sources: InlinkSourceEntry[];
+     loading: boolean;
+   }
+   ```
+   - State داخلی: `sources`, `loading`.
+   - یک `useEffect` با dependency `[projectId, targetPageId]`:
+     - `setLoading(true)`
+     - `inlinkGraphService.getInlinksFor(projectId, targetPageId)` را await کن
+     - `setSources(result); setLoading(false)`
+     - cleanup با flag `cancelled` تا اگر unmount شد، setState اجرا نشود.
+   - `count = sources.length`.
+
+۲. **اتصال invalidation در `src/services/analysis/analysisService.ts`:**
+   - بعد از `runSinglePageAnalysis` (هر جا که `resultRepository.upsert` اتفاق می‌افتد) فراخوانی `inlinkGraphService.invalidateProject(projectId)`.
+   - بعد از `startProjectAnalysis` (در نقطه پایان موفق صف) همینطور.
+   - بعد از `recomputeCandidates` همینطور.
+   - **توجه:** فقط در نقاطی که داده‌های منبع (results یا candidates) تغییر می‌کنند. در ویرایش دستی کاربر هم (در PageDetail.tsx → `handleSaveManual`) باید یک invalidation انجام شود — این نقطه را در تسک F1.3 هنگام لمس PageDetail اضافه می‌کنیم.
+
+۳. **هیچ کامپوننتی در این تسک ویرایش نشود.** فقط hook + invalidation در service.
+
+### محدودیت‌ها
+- ✅ هوک باید resilient باشد (در صورت unmount، بدون خطا)
+- ✅ count صفر معتبر است (نه null/undefined)
+- ⛔ بدون useLiveQuery
+- ⛔ بدون state global
+
+### معیار پذیرش
+- `tsc --noEmit` بدون خطا.
+- اگر در analysisService تحلیل تک‌صفحه‌ای انجام شود، فراخوانی بعدی هوک Index تازه بسازد (نه کش قدیمی).
+
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/services/analysis/inlinkGraphService.ts", "src/services/analysis/analysisService.ts", "src/hooks/useProject.ts"]`
+
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان با ابزار caling_tool فایل های کانتکست رو به صورت زنده فراخوانی کن و بخون و سپس کد این تسک رو بزن.
+
+---
+
+## تسک F1.3 — UI: Badge شمارنده + مودال لینک‌های ورودی در PageDetail
+
+### هدف
+نمایش بصری Inlink Analytics در صفحه `PageDetail`: یک Badge شمارنده در هدر و یک مودال با لیست صفحات مبدأ.
+
+### راهنمای پیاده‌سازی فنی
+
+۱. **ساخت کامپوننت جدید `src/components/InlinkBadge.tsx`:**
+   - props: `count: number; loading: boolean; onClick: () => void`.
+   - وقتی `loading=true` → نمایش Spinner کوچک.
+   - وقتی `count=0` → Badge خاکستری با متن «هیچ لینک ورودی». غیر قابل کلیک یا با cursor default.
+   - وقتی `count>0` → Badge آبی با عدد + آیکون `Link2` از lucide. کلیک‌پذیر.
+   - استایل با Tailwind، RTL، فقط فارسی. شبیه سایر Badgeهای موجود در PageDetail.
+
+۲. **ساخت کامپوننت جدید `src/components/InlinkModal.tsx`:**
+   - props:
+     ```ts
+     {
+       isOpen: boolean;
+       onClose: () => void;
+       targetTitle: string;
+       sources: InlinkSourceEntry[];
+       loading: boolean;
+       projectId: number;
+     }
+     ```
+   - از `src/components/ui/Modal.tsx` موجود استفاده کن.
+   - اگر `loading=true` → Spinner مرکزی با متن «در حال محاسبه گراف معکوس...».
+   - اگر `sources.length=0` → EmptyState با متن «هیچ صفحه‌ای به این صفحه لینک نداده است».
+   - در غیر اینصورت لیست:
+     - برای هر `entry`:
+       - عنوان صفحه مبدأ به‌صورت `<Link to={`/project/${projectId}/page/${entry.sourcePageId}`}>` (با onClose قبل از navigate یا استفاده از react-router Link).
+       - Badge کوچک با `entry.origin === 'result' ? 'تایید AI' : 'پیشنهاد الگوریتم'` (سبز برای result، خاکستری برای candidate).
+       - رتبه: `«رتبه ${entry.rank}»` در آن صفحه.
+       - score: اگر موجود `Score: ${entry.score!.toFixed(2)}`.
+       - matchedTags: اگر موجود و طول > 0، نمایش با Badgeهای کوچک. **حد ۵ تگ نمایش داده شود** و اگر بیشتر بود `+${n} more` (طبق درخواست کاربر برای جلوگیری از افت پرفورمنس).
+   - **Virtualization ساده:** اگر `sources.length > 100`، فقط ۱۰۰ تای اول رندر شود + پیام «بقیه پنهان شدند برای حفظ پرفورمنس». (نه نصب react-window.)
+
+۳. **ویرایش `src/pages/PageDetail.tsx`:**
+   - فراخوانی هوک:
+     ```ts
+     const inlink = useInlinkAnalytics(pId, pgId);
+     const [inlinkModalOpen, setInlinkModalOpen] = useState(false);
+     ```
+   - در هدر صفحه (همان flexbox که Badgeهای دیگر هستند، خط `<Badge variant="blue">SEO Workstation</Badge>`)، یک `<InlinkBadge count={inlink.count} loading={inlink.loading} onClick={() => setInlinkModalOpen(true)} />` اضافه شود.
+   - در پایین JSX، رندر `<InlinkModal isOpen={inlinkModalOpen} onClose={() => setInlinkModalOpen(false)} targetTitle={page.title} sources={inlink.sources} loading={inlink.loading} projectId={pId} />`.
+   - در `handleSaveManual` بعد از `resultRepository.upsert` صدا زدن `inlinkGraphService.invalidateProject(pId)` (تا اگر کاربر در همان نشست به صفحه مقصد برود، Index تازه ساخته شود).
+     - import مستقیم `inlinkGraphService` اشکالی ندارد چون این یک service است نه db.
+
+### محدودیت‌ها
+- ✅ بدون افزودن کتابخانه
+- ✅ تمام متن UI فارسی
+- ✅ بدون lazy loading حلقه‌ای — یک‌بار در mount صفحه load می‌شود
+- ⛔ بدون drag-and-drop
+- ⛔ بدون react-window یا کتابخانه virtualization
+- ⛔ بدون تغییر در سایر کامپوننت‌ها (CandidateCard, ProjectPages, ...)
+
+### معیار پذیرش
+1. در صفحه PageDetail یک Badge شمارنده در هدر دیده می‌شود.
+2. کلیک روی آن مودالی باز می‌کند با لیست صفحاتی که به این صفحه لینک می‌دهند.
+3. در هر ردیف: عنوان مبدأ، origin (تایید AI / پیشنهاد الگوریتم)، رتبه، score (اگر باشد)، matched_tags (حداکثر ۵).
+4. کلیک روی عنوان صفحه مبدأ → navigate به `PageDetail` آن صفحه.
+5. باز شدن مودال در پروژه ۷۰۰ صفحه‌ای بدون freeze (Spinner اگر هنوز Index آماده نیست، در غیر اینصورت لحظه‌ای).
+6. ویرایش دستی لینک‌ها در یک صفحه → فراخوانی بعدی Index تازه ساخته می‌شود.
+7. `tsc --noEmit` بدون خطا.
+
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/pages/PageDetail.tsx", "src/components/ui/Modal.tsx", "src/components/ui/Badge.tsx", "src/components/ui/Spinner.tsx", "src/components/ui/EmptyState.tsx", "src/services/analysis/inlinkGraphService.ts", "src/hooks/useInlinkAnalytics.ts"]`
+
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان با ابزار caling_tool فایل های کانتکست رو به صورت زنده فراخوانی کن و بخون و سپس کد این تسک رو بزن.
+
+---
+
+## ترتیب اجرای فاز ۲ (الزامی)
+
+```
+F1.1 (Reverse Index Service)
+  └→ F1.2 (Hook + invalidation)
+       └→ F1.3 (UI Badge + Modal)
+```
+
+## معیار پذیرش کل فیچر F1
+
+1. هیچ تغییری در `src/db.ts` (diff خالی).
+2. هیچ تغییری در `src/core/scoring/*` (diff خالی).
+3. باز کردن PageDetail در پروژه ۵۰۰۰ صفحه‌ای → UI پاسخ‌گو، Spinner در Badge تا Index آماده شود، سپس عدد ظاهر می‌شود. هیچ freeze.
+4. کلیک روی مودال در میانه build → Spinner داخل مودال، سپس لیست.
+5. منطق Hybrid: صفحاتی که در `results` هستند فقط از آنجا خوانده می‌شوند، بقیه از `candidates`.
+6. `tsc --noEmit` بدون خطا.

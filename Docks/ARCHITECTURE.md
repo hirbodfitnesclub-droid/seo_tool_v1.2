@@ -348,7 +348,126 @@ export async function computeCandidatesInWorker(pages) {
 
 ---
 
-## ۹. نکات امنیتی (بدون تغییر)
+## ۹. Inlink Analytics — گراف معکوس لینک‌سازی (فاز ۲ — فیچر F1)
+
+### مسئله
+سیستم تا R13 فقط مبدأ-محور است: هر `source_page_id` → یک `candidate_list` یا `recommended_links`. حالا کاربر می‌خواهد بُعد مقصد-محور را هم ببیند: «چه صفحاتی به این صفحه لینک می‌دهند؟»
+
+**چالش بنیادی:** Dexie فقط روی `source_page_id` ایندکس دارد. لیست لینک‌های مقصد در JSON رشته‌ای داخل `candidate_list` / `recommended_links` ذخیره شده است. هیچ ایندکس ثانویه روی `target_page_id` وجود ندارد و **تغییر اسکیما خط قرمز است**.
+
+### تصمیم معماری — Reverse Index in-memory با کش per-project
+
+به‌جای اسکن Dexie در زمان باز شدن مودال (که UI را freeze می‌کند یا چندین ثانیه طول می‌کشد)، یک ساختار داده مشتق در حافظه ساخته می‌شود:
+
+```ts
+type InlinkSourceEntry = {
+  sourcePageId: number;
+  sourceTitle: string;
+  rank: number;          // ترتیب لینک در لیست صفحه مبدأ (۱-based)
+  score?: number;        // فقط در مسیر candidates در دسترس است
+  matchedTags?: string[];// فقط در مسیر candidates در دسترس است
+  origin: 'result' | 'candidate'; // منبع داده: results (طلایی) یا candidates (fallback)
+};
+
+type InlinkIndex = Map<number /* targetPageId */, InlinkSourceEntry[]>;
+```
+
+### منطق ساخت Index (Hybrid Resolution)
+
+```
+برای هر صفحه‌ای که در پروژه وجود دارد به‌عنوان مبدأ:
+  if (resultRepository.getByPage(sourceId) !== undefined):
+    منبع = result.recommended_links  → origin='result'  (هوش مصنوعی تایید کرده)
+  else:
+    منبع = candidate.candidate_list   → origin='candidate' (fallback خام)
+  for each link in منبع with index i:
+    index.get(link.page_id).push({ sourcePageId: sourceId, sourceTitle, rank: i+1, ... })
+```
+
+**اصل کلیدی:** هر صفحه مبدأ فقط از **یک** منبع خوانده می‌شود (یا results یا candidates — هرگز هر دو). این منطق درخواست کاربر را دقیقاً پیاده می‌کند و از دوبار شمارش جلوگیری می‌کند.
+
+### کش و Invalidation
+
+ماژول `inlinkGraphService` یک کش module-level دارد:
+
+```ts
+const cache = new Map<number /* projectId */, {
+  index: InlinkIndex;
+  signature: string;  // fingerprint داده‌های منبع
+  builtAt: number;
+}>();
+```
+
+**signature** برای invalidation سبک: ترکیب `count(results) + count(candidates) + max(generated_at)` پروژه. هر زمان این مقدار تغییر کرد، کش invalid می‌شود و Index در پس‌زمینه دوباره ساخته می‌شود. هزینه محاسبه signature بسیار پایین (دو count + یک max) و بدون نیاز به اسکن کامل است.
+
+### استراتژی Lazy + Chunked Build (جلوگیری از UI Freeze)
+
+- ساخت Index **زمان mount صفحه `PageDetail`** (نه زمان کلیک مودال) شروع می‌شود؛ تا وقتی کاربر دکمه را بزند، احتمالاً Index آماده است.
+- پردازش با **chunkهای ۱۰۰ صفحه‌ای** و `await new Promise(r => setTimeout(r, 0))` بین chunkها (همان الگوی R11 برای CSV Parse) → Event Loop آزاد می‌ماند.
+- اگر کاربر زودتر مودال را باز کند، یک Spinner نمایش داده می‌شود تا Build کامل شود.
+- **نه Web Worker:** طبق درس R13، برای پروژه‌های زیر چند هزار صفحه سربار IPC از خود کار بزرگ‌تر است. Reverse Index در حد پارس JSON و push به Map است — O(N × averageLinksPerPage) که حتی برای ۵۰۰۰ صفحه روی Main Thread با chunking زیر ۲ ثانیه است.
+
+### جریان داده
+
+```
+PageDetail.tsx (UI - Layer 1)
+    │ mount با targetPageId
+    ▼
+useInlinkAnalytics(projectId, targetPageId)   ← Layer 2 (Hook)
+    │ در پس‌زمینه:
+    ▼
+inlinkGraphService.getOrBuildIndex(projectId) ← Layer 3 (Service)
+    │ بررسی کش با signature
+    │ اگر invalid → buildIndex (chunked)
+    ▼
+buildIndex(projectId):
+    ├─ resultRepository.listByProject(projectId)
+    ├─ candidateRepository (نیازمند listByProject جدید)
+    │   و pageRepository.listByProject(projectId) برای title صفحات مبدأ
+    └─ pages.length را به chunks ۱۰۰تایی بشکن
+    ▼
+Map<targetPageId, InlinkSourceEntry[]>
+    ▼
+hook خروجی: { count, sources, loading }
+    ▼
+UI:
+   - Badge با count (همیشه نمایش، حتی صفر)
+   - دکمه باز کردن مودال
+   - InlinkModal: لیست sources مرتب بر اساس (origin='result' اول, سپس score نزولی)
+```
+
+### قراردادهای API
+
+```ts
+// src/services/analysis/inlinkGraphService.ts
+export async function getOrBuildIndex(projectId: number): Promise<InlinkIndex>;
+export async function getInlinksFor(projectId: number, targetPageId: number): Promise<InlinkSourceEntry[]>;
+export function invalidateProject(projectId: number): void;
+
+// src/hooks/useInlinkAnalytics.ts
+export function useInlinkAnalytics(projectId: number, targetPageId: number): {
+  count: number;
+  sources: InlinkSourceEntry[];
+  loading: boolean;
+};
+```
+
+### Repositoryهای متاثر
+
+- ✅ `candidateRepository.ts` — افزودن یک متد جدید `listByProject(projectId): Promise<CandidateRecord[]>` (پس از ایندکس موجود `project_id`، یک کوئری ساده). **بدون تغییر اسکیما.**
+- ✅ `resultRepository.ts` — متد `listByProject` از قبل موجود است.
+- ✅ `pageRepository.ts` — متد `listByProject` از قبل موجود است.
+
+### نکات کلیدی پیاده‌سازی
+
+1. **پارس امن JSON:** از `safeJsonParse` فعلی استفاده شود. اگر یک رکورد خراب بود، فقط آن skip شود (نه crash).
+2. **مرتب‌سازی نمایش:** ابتدا entries با `origin='result'` (تایید AI)، سپس بر اساس `score` نزولی (در مسیر candidates) یا `rank` صعودی.
+3. **عدم نمایش self-link:** اگر مبدأ و مقصد یکسان بود، حذف شود (دفاع در عمق — نباید رخ دهد ولی).
+4. **حد بالا برای نمایش:** اگر sources > ۲۰۰، فقط ۲۰۰ تای اول در مودال (با virtualization ساده یا دکمه "نمایش بیشتر") — مشابه الگوی موجود در PageDetail.
+
+---
+
+## ۱۰. نکات امنیتی (بدون تغییر)
 
 - کلید Gemini API فقط در `localStorage` با کلید `LINKMESH_API_KEY`
 - در حال حاضر یک proxy روی `/api/gemini` (server.ts) وجود دارد که کلید را از env می‌خواند — این پابرجاست
