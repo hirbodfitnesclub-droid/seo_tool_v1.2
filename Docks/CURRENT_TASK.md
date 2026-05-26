@@ -4,82 +4,153 @@
 
 ---
 
-## فاز جاری: بهینه‌سازی ریشه‌ای پرفورمنس (R12)
+## فاز جاری: معماری تطبیقی پایپ‌لاین امتیازدهی (R13)
 
-پس از بررسی کامل معماری و کد، گلوگاه واقعی **نه CPU بود نه الگوریتم** — بلکه IPC و Worker Lifecycle. R11 لایه CPU را بهینه کرد ولی گلوگاه واقعی همچنان باز ماند.
-
----
-
-## تسک جاری: **R12 — حذف گلوگاه IPC و یکپارچه‌سازی ورکر**
-
-### وضعیت: **Completed ✅ (تکمیل شده)**
-
-### گزارش بهینه‌سازی‌های پیاده‌سازی شده:
-۱. **حذف فیلد `categories` از کاندیداها (کاهش ۹۵ درصدی بار پردازشی IPC):** فیلد اضافه `categories: cat` از خروج نهایی توابع `computeAllCandidates` و `findTopCandidates` حذف شد، زیرا این داده‌ها جلوتر در کامپوننت‌های پایینی و ارجاع‌های دیگر مستقیماً از دیتابیس مرجع واکشی می‌شوند.
-۲. **ادغام تراکنش‌ها در وب‌ورکر (رفع گلوگاه اسپاون موازی):** متد جدید `COMPUTE_ALL` در ورکر و متد تعاملی `computeAllInWorker` در لایه سرویس پیاده‌سازی گردید که تنها با یک بار ساخت شیء ورکر، جفت محاسبات IDF و Candidates را برگشت می‌دهد.
-۳. **تراکنش یکپارچه برای عملیات دیتابیس (رفع re-render مکرر):** تمامی خروجی‌ها در قالب یک `db.transaction` بسیار سریع ثبت می‌شوند و متد جدید مخصوص تراکنش (`upsertInTx`) برای IDF اضافه گردید.
-۴. **افزایش اندازه چانک‌های پردازشی CSV:** برای افزایش سرعت تحلیل داده‌های اولیه ورودی، با توجه به سرعت عالی Zod، مقدار `chunkSize` از ۱۰۰ به ۱۰۰۰ افزایش یافت.
-۵. **پیش‌بارگذاری ورکر (Pre-warm Worker):** جهت اجرای فوق‌العاده سریع نخستین ترکنش وب‌ورکر، تحلیل ماژول در `main.tsx` قرار گرفت.
-۶. **بهینه‌سازی رندرهای ری‌اکت:** کامپوننت `CandidateCard` با `React.memo` پوشیده شد.
-
-### چهار گلوگاه قطعی شناسایی شده (به ترتیب اولویت تاثیر)
-
-#### 🔴 گلوگاه A — اسپاون متوالی دو وب‌ورکر مستقل
-**محل:** `src/utils/candidateStorage.ts` گام‌های ۱ و ۵
-**علت:** `computeIDFInWorker` یک ورکر اسپاون+ترمینیت می‌کند، سپس `computeCandidatesInWorker` ورکر دوم را از صفر می‌سازد. در Vite dev mode، هر اسپاون ورکر شامل کامپایل و گراف ماژول جداگانه است.
-**تاثیر تخمینی:** ۴ تا ۱۰ ثانیه به‌ازای هر فراخوانی `computeAndStoreCandidates`.
-**راهکار:** ادغام در یک message type واحد `COMPUTE_ALL` در ورکر و یک تابع `computeAllInWorker` در scoringService.
-
-#### 🔴 گلوگاه B — IPC غول‌پیکر به‌خاطر چسبیدن `categories` به هر کاندیدا
-**محل:** `src/core/scoring/scorer.ts` خط ~۱۱۰۸ (در `findTopCandidates`) و خط ~۱۱۶۸ (در `computeAllCandidates`).
-**علت:** هر کاندیدا شامل کل آبجکت `categories` مقصد است. برای ۵۰۰۰ صفحه × ۵۰ کاندیدا = ۲۵۰هزار کپی آبجکت در structured-clone از ورکر به main.
-**این داده تکراری در پایین‌دست واقعاً مصرف نمی‌شود** — `TaskExecutor.executePage` با `allPages.find(...)` و `PageDetail` با `pageRepository.getById(...)` تگ‌ها را از منبع اصلی غنی‌سازی می‌کنند.
-**تاثیر تخمینی:** ۲ تا ۵ ثانیه structured-clone + کاهش ۹۵٪ حجم.
-**راهکار:** فقط فیلد `categories: cat` را از خروجی map نهایی scorer حذف کن. منطق امتیازدهی دست‌نخورده می‌ماند.
-
-#### 🟡 گلوگاه C — JSON.stringify ۵۰۰۰‌بار روی Main Thread با داده آلوده B
-**محل:** `src/utils/candidateStorage.ts` خط `JSON.stringify(list)` در map رکوردها.
-**علت:** بعد از بازگشت داده غول‌پیکر از ورکر، main thread برای هر صفحه یک stringify بزرگ می‌خورد.
-**تاثیر تخمینی:** ۱ تا ۳ ثانیه فریز.
-**راهکار:** با حل B خودبه‌خود حل می‌شود (داده ۵٪ شده).
-
-#### 🟡 گلوگاه D — chunk کوچک در CSV
-**محل:** `src/services/io/csvParser.ts` خط `chunkSize = 100`.
-**علت:** هر ۱۰۰ ردیف یک `setTimeout(0)` که در مرورگرها حداقل ۴ms تاخیر دارد.
-**تاثیر تخمینی:** ۲۰۰ms اضافی بر CSV ۵۰۰۰ ردیفی.
-**راهکار:** chunkSize = 1000.
-
-#### 🟡 گلوگاه E — Notification های مکرر Dexie باعث re-render
-**محل:** `src/utils/candidateStorage.ts` (دو operation جدا) و `src/pages/ProjectPages.tsx`.
-**راهکار:** پیچاندن idfUpsert + clearCandidates + bulkAdd در یک `db.transaction` واحد. این کار فقط یک‌بار notification می‌زند.
+پس از اجرای R12، پروژه‌های بزرگ سریع شدند ولی پروژه‌های کوچک/متوسط (مثلاً ۷۰۰ صفحه) به‌خاطر سربار راه‌اندازی Web Worker و IPC کند شدند. R13 یک شرط ساده اضافه می‌کند تا بر اساس تعداد صفحات یکی از دو مسیر (Fast-Track یا Heavy-Track) انتخاب شود. جزئیات معماری در بخش «Adaptive Scoring Pipeline» در `ARCHITECTURE.md` آمده.
 
 ---
 
-## شش گام پیاده‌سازی (به ترتیب)
+## تسک جاری: **R13 — Adaptive Scoring Pipeline (Fast-Track / Heavy-Track)**
 
-۱. **scorer.ts**: حذف `categories: cat` از خروجی map در `findTopCandidates` و `computeAllCandidates`. هیچ تغییر دیگری نه.
-۲. **scoringWorker.ts**: افزودن type جدید `COMPUTE_ALL` که هم IDF هم candidates را در یک پیام برمی‌گرداند. type های قدیمی نگه داشته شوند.
-۳. **scoringService.ts**: افزودن تابع `computeAllInWorker(pages)` که فقط یک ورکر اسپاون می‌کند.
-۴. **idfRepository.ts**: افزودن تابع `upsertInTx(projectId, idfJson)` که داخل transaction بیرونی اجرا می‌شود (بدون transaction داخلی).
-۵. **candidateStorage.ts**: استفاده از `computeAllInWorker`، سپس همه عملیات Dexie داخل یک `db.transaction('rw', [db.idfCache, db.candidates], ...)` واحد.
-۶. **csvParser.ts**: `chunkSize = 1000`.
+### وضعیت: **In Progress**
 
-### گام اختیاری ۷ — Pre-warm worker
-در `src/main.tsx` خط `import('./workers/scoringWorker?worker').catch(() => {})` اضافه شود تا اولین استفاده در Vite dev سریع باشد.
+### هدف
+حذف سربار Worker در پروژه‌های کوچک، با حفظ مزیت Worker در پروژه‌های بزرگ. مسیر اجرا بر اساس `pages.length` انتخاب می‌شود.
+
+### قانون انتخاب مسیر (سخت‌گیرانه)
+```
+const SCORING_WORKER_THRESHOLD = 1000;
+
+if (pages.length <= SCORING_WORKER_THRESHOLD) {
+  // Fast-Track — Main Thread, no worker
+} else {
+  // Heavy-Track — Web Worker via computeAllInWorker
+}
+```
+
+---
+
+## محل تغییر
+
+**فقط یک فایل ویرایش می‌شود:**
+- `src/utils/candidateStorage.ts`
+
+**فایل‌های دیگری که فقط خوانده می‌شوند (برای فهم contract، نه ویرایش):**
+- `src/core/scoring/idfCalculator.ts` — تابع `computeIDFMap(pages)` و تایپ `IDFMap`، `PageLike`
+- `src/core/scoring/scorer.ts` — تابع `computeAllCandidates(pages)` و تایپ `CandidateWithTags`
+- `src/services/scoring/scoringService.ts` — تابع `computeAllInWorker(pages)` (مسیر Heavy فعلی)
+- `src/repositories/idfRepository.ts` — متد `upsertInTx`
+- `src/repositories/candidateRepository.ts` — متدهای `clearByProject`, `bulkAdd`
+
+**هیچ فایل دیگری در این تسک ویرایش نمی‌شود. هیچ فایل جدیدی ساخته نمی‌شود.**
+
+---
+
+## راهنمای پیاده‌سازی فنی (گام‌به‌گام)
+
+### گام ۱ — افزودن import های Core
+در بالای `src/utils/candidateStorage.ts`، علاوه بر import های موجود، این دو را اضافه کن (مسیرها را با ساختار فعلی پروژه تطبیق بده — هر دو فایل قبلاً در `src/core/scoring/` موجودند):
+```ts
+import { computeIDFMap } from '../core/scoring/idfCalculator';
+import { computeAllCandidates, type CandidateWithTags } from '../core/scoring/scorer';
+```
+> توجه: `computeAllInWorker` همچنان import باقی می‌ماند چون در شاخه Heavy استفاده می‌شود.
+
+### گام ۲ — تعریف ثابت آستانه
+بلافاصله بعد از import ها، این ثابت را در سطح ماژول تعریف کن:
+```ts
+// آستانه انتخاب موتور پردازش: زیر این مقدار، اجرای مستقیم روی Main Thread (Fast-Track)
+const SCORING_WORKER_THRESHOLD = 1000;
+```
+
+### گام ۳ — بازنویسی بدنه `computeAndStoreCandidates`
+ساختار جدید تابع باید **دقیقاً** این جریان را داشته باشد:
+
+```ts
+export async function computeAndStoreCandidates(
+  projectId: number,
+  pages: Page[],
+  _weights: Record<string, number>,
+  _mode: 'linear' | 'weighted'
+): Promise<void> {
+
+  // ۱. آماده‌سازی pages با categories پارس‌شده — یک‌بار، مشترک بین دو مسیر
+  const pagesWithId = pages.map(p => ({
+    id: p.id!,
+    title: p.title,
+    categories: typeof p.categories === 'string' ? JSON.parse(p.categories) : p.categories
+  }));
+
+  // ۲. انتخاب مسیر بر اساس تعداد صفحات
+  let idfMap;
+  let candidatesMap: Map<number, CandidateWithTags[]>;
+
+  if (pagesWithId.length <= SCORING_WORKER_THRESHOLD) {
+    // ── Fast-Track: اجرای مستقیم روی Main Thread، بدون Worker ──
+    idfMap = computeIDFMap(pagesWithId);
+    candidatesMap = computeAllCandidates(pagesWithId);
+  } else {
+    // ── Heavy-Track: ارسال به Web Worker (همان مسیر R12) ──
+    const result = await computeAllInWorker(pagesWithId);
+    idfMap = result.idfMap;
+    candidatesMap = result.candidatesMap;
+  }
+
+  // ۳. آماده‌سازی رکوردها (مشترک)
+  const now = new Date().toISOString();
+  const records = Array.from(candidatesMap.entries()).map(([pageId, list]) => ({
+    project_id: projectId,
+    source_page_id: pageId,
+    candidate_list: JSON.stringify(list),
+    computed_at: now
+  }));
+
+  // ۴. ذخیره در یک تراکنش واحد — بدون تغییر نسبت به R12
+  await db.transaction('rw', [db.idfCache, db.candidates], async () => {
+    await idfRepository.upsertInTx(projectId, JSON.stringify(idfMap));
+    await candidateRepository.clearByProject(projectId);
+    await candidateRepository.bulkAdd(records);
+  });
+}
+```
+
+### گام ۴ — تأیید signature و سایر export ها
+- signature تابع `computeAndStoreCandidates` نباید تغییر کند.
+- تابع `getCachedIDF` در همان فایل دست‌نخورده باقی می‌ماند.
+- import `computeAllInWorker` نباید حذف شود (هنوز در Heavy-Track استفاده می‌شود).
+
+---
+
+## محدودیت‌های اختصاصی این تسک (سخت‌گیرانه)
+
+- ✅ فقط `src/utils/candidateStorage.ts` ویرایش می‌شود.
+- ✅ خروجی Dexie (`idfCache.idf_map` و `candidates.candidate_list`) باید **بایت-به-بایت یکسان** با حالت R12 باقی بماند، صرف‌نظر از مسیر اجرا. توابع core همان توابعی هستند که قبلاً در ورکر صدا زده می‌شدند.
+- ✅ هیچ تغییری در `scorer.ts`، `idfCalculator.ts`، `scoringService.ts`، یا `scoringWorker.ts` انجام نشود.
+- ✅ مقدار آستانه (`SCORING_WORKER_THRESHOLD = 1000`) صرفاً یک ثابت محلی بالای فایل است — وارد config یا env نشود.
+- ✅ هیچ console.log اضافه نشود مگر یک خط `console.log('[v0] scoring path', pagesWithId.length, pagesWithId.length <= SCORING_WORKER_THRESHOLD ? 'fast' : 'heavy')` برای debug که بعد از تأیید کاربر حذف خواهد شد.
+- ⛔ هیچ try/catch اضافه گرد scoring اضافه نکن — اگر در Fast-Track exception رخ داد، باید بالا برود (همان رفتار قبلی).
+- ⛔ هیچ تغییر در ترتیب آرگومان‌های `computeIDFMap` یا `computeAllCandidates`. این توابع pure هستند و pages را همان شکلی که computeAllInWorker می‌گیرد می‌گیرند.
+- ⛔ async/await اضافه روی توابع sync core نگذار. آن‌ها sync هستند و باید sync صدا زده شوند.
+- ⛔ هیچ پیش‌بارگذاری/pre-warm Worker در main.tsx تغییر نکند. در پروژه‌های کوچک Worker اصلاً ساخته نمی‌شود ولی pre-warm فعلی مشکلی ایجاد نمی‌کند (idle import).
+
+---
+
+## معیار پذیرش
+
+1. آپلود CSV با ~۷۰۰ صفحه → ورود به صفحه پروژه در زیر ۱.۵ ثانیه.
+2. کلیک «بررسی الگوریتم» روی همان پروژه → اتمام در زیر ۱.۵ ثانیه.
+3. پروژه با > ۱۰۰۰ صفحه همچنان از Worker استفاده می‌کند و UI freeze نمی‌شود.
+4. خروجی `candidates` و `idfCache` در Dexie برای یک پروژه ثابت بین Fast-Track و Heavy-Track یکسان است (با تغییر آستانه به مقادیر متفاوت و مقایسه تست شود).
+5. `tsc --noEmit` بدون خطا.
 
 ---
 
 ## رله کانتکست (Context Relay)
 
-- **چه چیزی در R11 انجام شد:** بهینه‌سازی CPU (pre-parse، slice(0,50)، CSV chunking) — این‌ها صحیح بودند اما لایه اشتباه را هدف گرفتند.
-- **چه چیزی R12 حل می‌کند:** لایه واقعی گلوگاه = Worker Lifecycle + IPC + Dexie Notifications.
-- **قانون مطلق:** ضرایب، توابع، و ترتیب لایه‌های امتیازدهی scorer **یک کاراکتر هم تغییر نمی‌کند**. تنها تغییر مجاز در scorer: حذف فیلد `categories: cat` از خروجی نهایی map (دو نقطه). تست `scorer.test.ts` باید pass شود و خروجی عددی بایت‌به‌بایت یکسان بماند.
-- **اعتبارسنجی نهایی:** بعد از پیاده‌سازی، روی یک CSV ۵۰۰۰ ردیفی، زمان «آپلود → Config» باید زیر ۳ ثانیه و زمان «بررسی الگوریتم» باید زیر ۲ ثانیه باشد.
+- **چرا این تسک لازم شد:** R12 سربار IPC را برای پروژه‌های بزرگ کم کرد، ولی برای پروژه‌های کوچک/متوسط، هزینه ثابت ساخت Worker (~۲–۴ ثانیه در dev mode Vite) خودش گلوگاه شد.
+- **چرا Fast-Track امن است:** توابع core در R4 از وابستگی DOM/Dexie/React جدا شدند. اجرای آن‌ها روی Main Thread برای ≤۱۰۰۰ صفحه چند صد میلی‌ثانیه طول می‌کشد، که بسیار کمتر از سربار راه‌اندازی Worker است.
+- **قانون مطلق:** الگوریتم scorer و خروجی عددی آن یک کاراکتر هم تغییر نمی‌کند. این تسک فقط یک شاخه `if/else` اضافه می‌کند.
 
----
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/utils/candidateStorage.ts", "src/services/scoring/scoringService.ts", "src/core/scoring/scorer.ts", "src/core/scoring/idfCalculator.ts", "src/repositories/idfRepository.ts", "src/repositories/candidateRepository.ts"]`
 
-## مظنونین رد شده (نیازی به مداخله ندارند)
-
-- ❌ **سربار تراکنش‌های Dexie فی‌نفسه**: Dexie در bulkAdd ۵۰۰۰ رکورد عملکرد خوبی دارد. مشکل از حجم داده هر رکورد است (گلوگاه B) نه تعداد تراکنش‌ها.
-- ❌ **منطق الگوریتم scorer**: ضرایب و توابع دست‌نخورده باقی می‌مانند. الگوریتم سریع است؛ گلوگاه در انتقال داده‌ی پسا-الگوریتم است.
-- ❌ **حلقه pre-parse R11**: این بهینه‌سازی صحیح بود و نگه داشته می‌شود.
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان فایل‌های کانتکست را با ابزار خواندن باز کن و بخوان، سپس کد این تسک را بزن.

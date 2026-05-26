@@ -129,6 +129,8 @@ const COEFFICIENTS = {
   // مقصد
   DESTINATION_CITY_MATCH: 3.0,
   DESTINATION_COUNTRY_MATCH: 0.5,
+  OCCASION_COUNTRY_MATCH: 3.0,
+  OCCASION_TO_OCCASION_COUNTRY_MATCH: 5.0,
   DESTINATION_DIFFERENT_COUNTRY: 0.1,
 
   // حمل‌ونقل
@@ -354,10 +356,16 @@ export function parsePage(page: PageInfo, cat: Record<string, unknown>): ParsedP
   // این صفحات هاب اصلی مقصد هستند و در ماتریس جریمه متقاطع رفتار خاصی دارند.
   const titleClean = title.trim();
   
+  const origin = (() => {
+    const o = (cat['شهر_یا_استان_مبدا'] as string)?.trim();
+    return o && o !== 'null' ? o : null;
+  })();
+  const hasOrigin = hasOriginInTitle(title) || (origin !== null && origin !== '');
+
   // تشخیص قوی صفحه مادر: مقصد دارد ولی هیچ ویژگی تخصصی ندارد
   const hasTransportMark = !!extractTransport(title);
   const hasHotelMark = hasHotelInTitle(title, cat['نام_دقیق_هتل']);
-  const hasOriginMark = hasOriginInTitle(title);
+  const hasOriginMark = hasOrigin;
   const hasDestination = !!city || !!country;
   const hasGeneralMark = generalKeywords.length > 0;
   // تشخیص تعطیلات و مناسبت
@@ -381,10 +389,7 @@ export function parsePage(page: PageInfo, cat: Record<string, unknown>): ParsedP
     title,
     city,
     country,
-    origin: (() => {
-      const o = (cat['شهر_یا_استان_مبدا'] as string)?.trim();
-      return o && o !== 'null' ? o : null;
-    })(),
+    origin,
     month,
     monthIdx,
     season,
@@ -395,7 +400,7 @@ export function parsePage(page: PageInfo, cat: Record<string, unknown>): ParsedP
     travelType: cat['نوع_سفر'] !== 'null' ? (cat['نوع_سفر'] as string) : null,
     tourClass: cat['برچسب_کلاسی_تور'] !== 'null' ? (cat['برچسب_کلاسی_تور'] as string) : null,
     regionDirection: cat['جهت_در_منطقه'] !== 'null' ? (cat['جهت_در_منطقه'] as string) : null,
-    hasOrigin: hasOriginInTitle(title),
+    hasOrigin,
     hasMonth,
     hasSeason,
     hasTime,
@@ -514,11 +519,27 @@ function calcDestinationScore(
   }
 
   if (src.country && tgt.country && src.country === tgt.country) {
-    return {
-      coef: COEFFICIENTS.DESTINATION_COUNTRY_MATCH,
-      tag: 'کشور_مقصد',
-      bonus: COEFFICIENTS.DESTINATION_BONUS,
-    };
+    if (src.hasOccasion === true) {
+      if (tgt.hasOccasion === true) {
+        return {
+          coef: COEFFICIENTS.OCCASION_TO_OCCASION_COUNTRY_MATCH,
+          tag: 'تطابق_کشور_مناسبتی',
+          bonus: 0,
+        };
+      } else {
+        return {
+          coef: COEFFICIENTS.OCCASION_COUNTRY_MATCH,
+          tag: 'تطابق_کشور_مناسبتی',
+          bonus: 0,
+        };
+      }
+    } else {
+      return {
+        coef: COEFFICIENTS.DESTINATION_COUNTRY_MATCH,
+        tag: 'کشور_مقصد',
+        bonus: COEFFICIENTS.DESTINATION_BONUS,
+      };
+    }
   }
 
   return { coef: COEFFICIENTS.DESTINATION_DIFFERENT_COUNTRY, tag: null, bonus: 0 };
@@ -626,6 +647,10 @@ function calcTimeScore(
   tgt: ParsedPage,
   currentMonthIdx: number
 ): { coef: number; tag: string | null } {
+  if (src.hasOccasion === true && (tgt.season || tgt.month) && !tgt.hasOccasion) {
+    return { coef: 0.2, tag: null };
+  }
+
   // قانون استثنایی نوروز (قبل از همه چیز)
   const norouzResult = applyNorouzOverride(src, tgt);
   if (norouzResult) return norouzResult;
@@ -832,6 +857,10 @@ function calcHotelStarScore(src: ParsedPage, tgt: ParsedPage): { coef: number; t
  * جریمه: فقط اگر هر دو دارند ولی متفاوت
  */
 function calcOriginScore(src: ParsedPage, tgt: ParsedPage): { coef: number; tag: string | null; bonus: number } {
+  if (src.hasOccasion === true && tgt.hasOrigin === true) {
+    return { coef: 0.5, tag: null, bonus: 0 };
+  }
+
   if (!src.hasOrigin || !tgt.hasOrigin) {
     return { coef: COEFFICIENTS.ORIGIN_NEUTRAL, tag: null, bonus: 0 };
   }
@@ -1019,6 +1048,9 @@ export function calculateScoreParsed(
   // ۱۱. صفحات مادر (God Multipliers)
   const motherPage = checkMotherPage(src, tgt);
   score *= motherPage.multiplier;
+
+  // جمع بونوس‌ها با امتیاز نهایی
+  score = score + originBonus + destinationBonus;
 
   return {
     score,

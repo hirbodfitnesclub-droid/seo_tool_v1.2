@@ -222,7 +222,7 @@
 ### هدف
 وقتی کاربر در میان پردازش تب را می‌بندد و دوباره باز می‌کند، صف‌هایی که status='processing' دارند ولی updated_at آن‌ها قدیمی است باید به وضعیت 'paused' تبدیل شوند تا کاربر بتواند آگاهانه resume کند.
 
-### راهنمای پیاده‌سازی فنی
+### راهنمای پیاده‌سازی فن��
 ۱. `src/repositories/queueRepository.ts` (از تسک R1) — متد `findInterrupted()` را پیاده کن:
    - تمام رکوردهای `status === 'processing'` که `updated_at` آن‌ها بیش از ۳۰ ثانیه از زمان فعلی فاصله دارد را بازگرداند.
 
@@ -390,3 +390,46 @@ R2, R3, R4 می‌توانند مستقل اجرا شوند ولی همگی به
 - نحوه ذخیره‌سازی Dexie (تراکنش‌های تودرتو یا سربار حجیم).
 - Re-render های کشنده در لایه React (مثلاً هوک‌های متصل به دیتابیس).
 - رفتار Vite در کلاینت برای اجرای Web Worker.
+
+---
+
+## تسک R12 — یکپارچه‌سازی Worker و حذف رفت‌و‌برگشت IPC
+
+### مسئله
+بعد از R11 معلوم شد گلوگاه نه الگوریتم، بلکه **سربار IPC و تراکنش‌های چندگانه Dexie** است: ابتدا `computeIDFInWorker` صدا زده می‌شد، نتیجه به Main برمی‌گشت، سپس `computeAllInWorker` دوباره Worker اسپاون می‌کرد، نتیجه (به‌صورت Map) دوباره به Main برمی‌گشت و در دو تراکنش جداگانه Dexie ذخیره می‌شد.
+
+### کارهای انجام‌شده
+۱. **یک Worker، یک پیام (`COMPUTE_ALL`)**: پیام‌های `COMPUTE_IDF` و دو spawn جدا حذف شد. حالا فقط یک‌بار Worker اسپاون می‌شود، `pages + currentDoc + topK` می‌رود، `{ idfMap, candidates }` در یک پیام `DONE_ALL` برمی‌گردد.
+۲. **حذف Map از مرز Worker**: خروجی idf به‌صورت `Array<[string, number]>` منتقل می‌شود تا از سربار structured-clone روی Map جلوگیری شود؛ Main آن را یک‌بار به Map تبدیل می‌کند.
+۳. **تراکنش واحد Dexie**: ذخیره `idfCache` و `candidates` در یک `db.transaction('rw', ...)` ادغام شد.
+۴. **حذف فیلد `categories` از candidate**: این فیلد فقط در زمان score استفاده می‌شد و در Dexie redundancy ایجاد می‌کرد؛ حالا فقط `pageId` ذخیره و در زمان نمایش از pages join می‌شود.
+
+### نتیجه
+سربار IPC تقریباً نصف شد و تراکنش‌های Dexie از ۲ به ۱ کاهش یافت. اما برای پروژه‌های کوچک/متوسط (~۷۰۰ صفحه) همچنان هزینه راه‌اندازی Worker از کل کار CPU بزرگ‌تر است → نیاز به R13.
+
+---
+
+## تسک R13 — معماری تطبیقی (Adaptive Pipeline: Fast-Track / Heavy-Track)
+
+### مسئله
+برای پروژه‌های ≤ ~۱۰۰۰ صفحه، **هزینه ثابت اسپاون Worker + structured-clone + transfer دوطرفه** از خود کار CPU بزرگ‌تر است. اجرای همان منطق Pure روی Main Thread در زیر ۱ ثانیه تمام می‌شود، در حالی که مسیر Worker چند ثانیه طول می‌کشد.
+
+### تصمیم
+دو مسیر مجزا با انتخاب runtime:
+
+- **Fast-Track** (`pages.length ≤ 1000`): اجرای مستقیم `computeIDFMap` و `computeAllCandidates` از `core/scoring/*` روی Main Thread، بدون Worker، بدون postMessage.
+- **Heavy-Track** (`pages.length > 1000`): همان مسیر R12 (`computeAllInWorker`) برای جلوگیری از freeze در پروژه‌های بزرگ.
+
+ثابت `SCORING_WORKER_THRESHOLD = 1000` در `src/utils/candidateStorage.ts` تعریف می‌شود.
+
+### محدوده تغییر
+- **فقط** `src/utils/candidateStorage.ts` ویرایش می‌شود.
+- خروجی Dexie (`idfCache`, `candidates`) در هر دو مسیر بایت-به-بایت یکسان است.
+- `scoringService.ts` و `scoringWorker.ts` بدون تغییر باقی می‌مانند (Heavy-Track همچنان از آن‌ها استفاده می‌کند).
+- `core/scoring/*` بدون تغییر باقی می‌ماند (Pure functions، از R4 قابل استفاده روی Main Thread است).
+
+### معیار پذیرش
+1. پروژه ۷۰۰ صفحه‌ای: تحلیل با الگوریتم داخلی در زیر ۱ ثانیه تمام می‌شود.
+2. پروژه ۵۰۰۰ صفحه‌ای: UI freeze نمی‌شود (Worker مسیر).
+3. خروجی Dexie هر دو مسیر یکسان است.
+4. `tsc --noEmit` بدون خطا.
