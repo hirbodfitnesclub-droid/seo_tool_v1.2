@@ -467,7 +467,250 @@ export function useInlinkAnalytics(projectId: number, targetPageId: number): {
 
 ---
 
-## ۱۰. نکات امنیتی (بدون تغییر)
+## ۱۰. Live / Temporal Boost — لایه ضریب‌دهی فصلی-مناسبتی (فاز ۲ — فیچر F2)
+
+### مسئله
+امتیاز خام محاسبه‌شده توسط `scorer.ts` بر اساس شباهت معنایی (تگ‌ها/جکارد/عنوان) است و **زمان‌محور نیست**. در عمل، اگر در پاییز هستیم، یک تور «پیست اسکی توچال» باید نسبت به «جزیره کیش بهار» اولویت بسیار بالاتری بگیرد. اما هیچ‌یک از این منطق در امتیاز خام منعکس نیست.
+
+### تصمیم معماری — Middleware in-memory در زمان مرتب‌سازی نمایش
+- **مطلق:** `scorer.ts`، `idfCalculator.ts` و امتیازات ذخیره‌شده در `candidates.candidate_list` (Dexie) **هرگز** تغییر نمی‌کنند.
+- **رویکرد:** یک سرویس Pure به نام `temporalService.ts` تابعی صادر می‌کند که آرایه‌ای از کاندیداها (با `score` خام) را می‌گیرد و آرایه‌ای جدید با فیلدهای محاسبه‌شده برمی‌گرداند:
+  ```ts
+  type BoostedCandidate = OriginalCandidate & {
+    boostedScore: number;       // score * multiplier
+    temporalMultiplier: number; // 4 | 3 | 1 | 0.15
+    temporalReason: string;     // مثال: «پیش‌واز یلدا — ۴۵ روز مانده»
+    temporalLabel: 'pre' | 'current' | 'neutral' | 'out-of-season';
+  };
+  ```
+- **نقطه اعمال:** فقط در لایه UI/Service هنگام آماده‌سازی لیست برای نمایش یا ارسال به Gemini. هرگز قبل از `bulkAdd` به Dexie.
+
+### معماری لایه‌ای فیچر F2
+
+```
+┌───────────────────────────────────────────────────────────────┐
+│ Layer 1 — UI                                                  │
+│  Config.tsx           ── سوییچ سراسری + بخش مدیریت CSV       │
+│  PageDetail.tsx       ── سوییچ سریع (Quick Toggle) + Badge    │
+│  TemporalBadge.tsx    ── نمایش وضعیت زمانی روی هر کاندیدا     │
+└──────────────────────┬────────────────────────────────────────┘
+                       │
+┌──────────────────────▼────────────────────────────────────────┐
+│ Layer 2 — State (Context API — جایگزین Zustand)              │
+│  src/contexts/TemporalContext.tsx                             │
+│  - globalEnabled: boolean                                     │
+│  - perPageEnabled: Map<pageId, boolean>  (override موضعی)    │
+│  - events: TemporalEvent[]   (پارس‌شده از CSV)                │
+│  - persist: localStorage (LINKMESH_TEMPORAL_*)                │
+└──────────────────────┬────────────────────────────────────────┘
+                       │
+┌──────────────────────▼────────────────────────────────────────┐
+│ Layer 3 — Services                                            │
+│  src/services/temporal/temporalService.ts   ← Core (Pure)     │
+│  src/services/temporal/temporalCsvService.ts ← Parser/Gen    │
+│  src/services/temporal/jalaliCalendar.ts    ← Intl wrapper   │
+└──────────────────────┬────────────────────────────────────────┘
+                       │
+┌──────────────────────▼────────────────────────────────────────┐
+│ Layer 4 — Constants                                           │
+│  src/constants/temporalSeasons.ts  ← فصل‌ها/ماه‌های built-in  │
+└───────────────────────────────────────────────────────────────┘
+```
+
+### قواعد محاسبه (Decision Tree برای هر کاندیدا)
+
+ورودی برای هر کاندیدا: `targetTitle`, `targetCategories` (از `pages.categories` — یا تگ‌های موجود در candidate). در زمان فعلی شمسی `today = { year, month, day }` ثابت است (یک‌بار محاسبه می‌شود).
+
+```
+برای هر event فعال (CSV + built-in):
+  match = آیا یکی از event.keywords در targetTitle یا targetCategories هست؟
+  if !match: continue
+  
+  اگر today در بازه [event.startDate, event.endDate]:
+    ⇒ status = 'current', multiplier = 3
+  
+  وگرنه اگر event.startDate - today در [۳۰, ۶۰] روز:
+    ⇒ status = 'pre', multiplier = 4
+  
+  وگرنه:
+    ⇒ skip (این event بر این کاندیدا اثر ندارد)
+
+اگر هیچ event matched نشد ولی کاندیدا حداقل یک کلمه‌کلیدی فصلی/مناسبتی دارد
+که الان «خارج از فصل» است (مثلاً «بهار» در پاییز):
+  ⇒ status = 'out-of-season', multiplier = 0.15
+
+در غیر اینصورت:
+  ⇒ status = 'neutral', multiplier = 1
+
+بهترین event match = بالاترین multiplier (priority: pre > current > neutral > out-of-season)
+وقتی هم pre و هم current match شدند، pre برنده است (multiplier = 4).
+```
+
+### فصل‌ها و ماه‌های Built-in
+
+ثابت `BUILT_IN_TEMPORAL_EVENTS` در `src/constants/temporalSeasons.ts` شامل:
+
+| event | بازه شمسی | کلمات کلیدی |
+|---|---|---|
+| بهار | ۱ فروردین – ۳۱ خرداد | بهار، نوروز، عید، فروردین، اردیبهشت، خرداد |
+| تابستان | ۱ تیر – ۳۱ شهریور | تابستان، تیر، مرداد، شهریور، ساحل، گرما |
+| پاییز | ۱ مهر – ۳۰ آذر | پاییز، مهر، آبان، آذر، رنگارنگ |
+| زمستان | ۱ دی – ۲۹/۳۰ اسفند | زمستان، دی، بهمن، اسفند، برف، اسکی |
+| نوروز | ۲۸ اسفند – ۱۳ فروردین | نوروز، عید، تعطیلات نوروز، سیزده‌بدر |
+| یلدا | ۳۰ آذر | یلدا، شب چله |
+
+این لیست در فایل constants ثابت است و در آینده قابل گسترش است.
+
+### قرارداد ساختار CSV کاربر
+
+```csv
+نام_مناسبت,تاریخ_شروع_شمسی,تاریخ_پایان_شمسی,کلمات_کلیدی
+شب یلدا,1404/09/30,1404/09/30,یلدا|شب چله|انار
+نوروز,1404/12/29,1405/01/13,نوروز|عید|تعطیلات بهاری
+کنسرت تابستانی,1405/05/15,1405/05/20,کنسرت|موسیقی|تابستانی
+```
+
+- جداکننده ستون: `,` (Papa Parse)
+- جداکننده کلمات کلیدی داخل ستون آخر: `|` (Pipe)
+- تاریخ: فرمت `YYYY/MM/DD` شمسی (با اعداد فارسی یا انگلیسی، normalizer هر دو را می‌پذیرد)
+- اعتبارسنجی با Zod schema در `temporalCsvService.ts` (طبق pattern تسک R3)
+
+### قراردادهای API سرویس
+
+```ts
+// src/services/temporal/jalaliCalendar.ts
+export interface JalaliDate { year: number; month: number; day: number; }
+export function getCurrentJalaliDate(): JalaliDate;
+export function parseJalaliDate(input: string): JalaliDate | null; // پذیرش اعداد فا/انگ
+export function jalaliDaysBetween(a: JalaliDate, b: JalaliDate): number; // b - a
+export function isJalaliInRange(d: JalaliDate, start: JalaliDate, end: JalaliDate): boolean;
+
+// src/services/temporal/temporalService.ts
+export type TemporalLabel = 'pre' | 'current' | 'neutral' | 'out-of-season';
+
+export interface TemporalEvent {
+  id: string;             // uuid کوتاه یا hash
+  name: string;
+  startDate: JalaliDate;
+  endDate: JalaliDate;
+  keywords: string[];     // lower-case + trim شده
+  source: 'csv' | 'builtin';
+}
+
+export interface BoostedCandidate {
+  // فیلدهای کاندیدای اصلی منعکس می‌شود
+  page_id: number;
+  title: string;
+  score: number;          // خام (دست‌نخورده)
+  matched_tags: string[];
+  // ضمائم F2:
+  boostedScore: number;
+  temporalMultiplier: 4 | 3 | 1 | 0.15;
+  temporalLabel: TemporalLabel;
+  temporalReason: string;
+  matchedEventName: string | null;
+}
+
+export function applyTemporalBoost(
+  candidates: any[],          // آرایه خروجی صفحه — شامل title و categories یا matched_tags
+  options: {
+    events: TemporalEvent[];  // built-in + CSV ترکیب‌شده
+    today?: JalaliDate;        // پیش‌فرض = getCurrentJalaliDate()
+    targetMetadata: Map<number, { title: string; categoryValues: string[] }>;
+    // طبق منطق: یا از خود candidate.title و candidate.matched_tags استفاده می‌شود
+    // یا اگر داده غنی‌تر بود، از targetMetadata پاس‌داده‌شده استفاده می‌شود.
+  }
+): BoostedCandidate[];
+
+// نکته مهم: applyTemporalBoost یک تابع Pure است.
+// آرایه ورودی mutate نمی‌شود؛ آرایه جدید برمی‌گرداند.
+
+// src/services/temporal/temporalCsvService.ts
+export function generateCsvTemplate(): string;  // string CSV با هدر فارسی + ۲ ردیف نمونه
+export function parseCsvFile(file: File): Promise<{
+  events: TemporalEvent[];
+  errors: string[];   // پیام‌های فارسی برای ردیف‌های invalid
+}>;
+```
+
+### Context API (جایگزین Zustand — تطبیق با پشته)
+
+```ts
+// src/contexts/TemporalContext.tsx
+interface TemporalState {
+  globalEnabled: boolean;
+  perPageEnabled: Record<number, boolean>; // override موضعی صفحه
+  csvEvents: TemporalEvent[];
+  builtInEvents: TemporalEvent[];          // ثابت — از constants لود می‌شود
+}
+
+interface TemporalContextValue extends TemporalState {
+  setGlobalEnabled: (v: boolean) => void;
+  setPageEnabled: (pageId: number, v: boolean) => void;     // null = پاک کردن override
+  setCsvEvents: (events: TemporalEvent[]) => void;
+  isEnabledForPage: (pageId: number) => boolean;            // global AND/OR per-page override
+  getAllActiveEvents: () => TemporalEvent[];                // builtIn + csv
+}
+```
+
+### Persistence (localStorage — نه Dexie)
+
+| کلید | مقدار |
+|---|---|
+| `LINKMESH_TEMPORAL_GLOBAL_ENABLED` | `'true'` / `'false'` |
+| `LINKMESH_TEMPORAL_PER_PAGE` | `JSON.stringify(Record<number, boolean>)` |
+| `LINKMESH_TEMPORAL_CSV_EVENTS` | `JSON.stringify(TemporalEvent[])` |
+
+invalidation: ندارد. تغییر هر مقدار → Provider بلافاصله state و localStorage را sync می‌کند → کامپوننت‌های مصرف‌کننده re-render می‌شوند → `applyTemporalBoost` در render بعدی با مقادیر جدید اجرا می‌شود.
+
+### نقاط اعمال در UI (نمایش)
+
+1. **`PageDetail.tsx`** — `displayedCandidates` قبل از map شدن به `<CandidateCard>` از طریق `applyTemporalBoost` عبور می‌کند **اگر** `temporalCtx.isEnabledForPage(pgId)` true باشد. مرتب‌سازی نهایی بر اساس `boostedScore` نزولی می‌شود.
+2. **`PageDetail.tsx` Quick Toggle** — یک سوییچ کوچک کنار Badge‌ها که فقط `temporalCtx.setPageEnabled(pgId, !current)` صدا می‌زند. تغییر آنی چون state در Context است.
+3. **`Config.tsx`** — یک سکشن جدید با: سوییچ سراسری + دکمه دانلود تمپلیت + ورودی فایل CSV + جدول preview eventهای فعال.
+4. **`CandidateCard.tsx` (ویرایش حداقلی)** — اگر `boostedScore !== score` و `temporalMultiplier !== 1` بود، یک Badge کوچک (`<TemporalBadge>`) کنار rank نمایش داده می‌شود (`+4x یلدا` یا `−penalty خارج از فصل`).
+
+### نقاط اعمال در ارسال به Gemini
+
+`runSinglePageAnalysis` در `analysisService.ts` لیست top30 را قبل از ارسال به `buildSinglePagePrompt` از `applyTemporalBoost` عبور می‌دهد و **بر اساس boostedScore دوباره مرتب می‌کند** (اگر فیچر برای آن صفحه فعال است). به این ترتیب AI صفحاتی را اول می‌بیند که از نظر زمانی هم relevant هستند. **هیچ تغییری در فرمت prompt یا schema** Gemini.
+
+### جریان داده
+
+```
+کاربر در Config:
+  CSV آپلود → temporalCsvService.parseCsvFile → Zod validate
+       ↓ (موفق)              ↓ (خطا)
+  Context.setCsvEvents       Toast خطا + پیشنهاد دانلود تمپلیت
+       ↓
+  localStorage update
+       ↓
+کاربر در PageDetail:
+  Quick Toggle ON
+       ↓
+  Context.setPageEnabled(pgId, true)
+       ↓
+  re-render PageDetail
+       ↓
+  applyTemporalBoost(top30, { events: getAllActiveEvents(), targetMetadata })
+       ↓
+  لیست جدید با boostedScore → sort نزولی → render CandidateCard ها
+       ↓
+  هر کارت: TemporalBadge اگر multiplier ≠ 1
+```
+
+### معیارهای پذیرش
+
+1. خروجی Dexie بایت-به-بایت دست‌نخورده (diff = 0).
+2. `scorer.ts` و `idfCalculator.ts` diff = 0.
+3. در پروژه ۷۰۰ صفحه‌ای: روشن کردن سوییچ هیچ freeze نمی‌سازد (محاسبه روی top30 یا top200 instant است).
+4. اگر فیچر خاموش باشد، رفتار قبلی (مرتب‌سازی بر اساس `score` خام) حفظ شود.
+5. تاریخ شمسی فقط با `Intl.DateTimeFormat('fa-IR')` بومی به‌دست می‌آید — هیچ کتابخانه moment-jalaali.
+6. آپلود CSV نامعتبر → خطای فارسی + لینک دانلود تمپلیت.
+7. تنظیمات بعد از reload صفحه از localStorage بازخوانی شود.
+
+---
+
+## ۱۱. نکات امنیتی (بدون تغییر)
 
 - کلید Gemini API فقط در `localStorage` با کلید `LINKMESH_API_KEY`
 - در حال حاضر یک proxy روی `/api/gemini` (server.ts) وجود دارد که کلید را از env می‌خواند — این پابرجاست
