@@ -30,8 +30,9 @@ export async function computeAndStoreCandidates(
   if (pagesWithId.length <= SCORING_WORKER_THRESHOLD) {
     // ── Fast-Track: اجرای مستقیم روی Main Thread، بدون Worker ──
     idfMap = computeIDFMap(pagesWithId);
-    const rawCandidatesMap = computeAllCandidates(pagesWithId);
+    const rawCandidatesMap = computeAllCandidates(pagesWithId as any);
     // برای تطابق دقیق بایت‌به‌بایت با خروجی وب‌ورکر (مسیر Heavy)، نتایج را به ۵۰ کاندیدای برتر محدود می‌کنیم
+
     candidatesMap = new Map<number, CandidateWithTags[]>(
       Array.from(rawCandidatesMap.entries()).map(([pageId, list]) => [
         pageId,

@@ -9,6 +9,7 @@ import * as weightRepository from '../../repositories/weightRepository';
 import * as candidateRepository from '../../repositories/candidateRepository';
 import * as resultRepository from '../../repositories/resultRepository';
 import * as queueRepository from '../../repositories/queueRepository';
+import * as inlinkGraphService from './inlinkGraphService';
 import { computeAndStoreCandidates } from '../../utils/candidateStorage';
 import { buildSinglePagePrompt } from '../api/promptBuilder';
 import { callGemini } from '../api/geminiClient';
@@ -68,6 +69,9 @@ export async function startProjectAnalysis(
       updated_at: new Date().toISOString()
     });
   }
+
+  // ابطال کش پس از اتمام/شروع مجدد یا تخصیص صف جدید تحلیل در پروژه
+  inlinkGraphService.invalidateProject(projectId);
 }
 
 /**
@@ -117,6 +121,10 @@ export async function runSinglePageAnalysis(
   );
 
   const response = await callGemini(prompt, model);
+  
+  // ابطال حافظه گراف معکوس پروژه پس از تحلیل تک صفحه‌ای موفق
+  inlinkGraphService.invalidateProject(projectId);
+
   return response.selected_links || [];
 }
 
@@ -139,4 +147,7 @@ export async function recomputeCandidates(projectId: number): Promise<void> {
   });
 
   await computeAndStoreCandidates(projectId, pages, weightMap, project.scoring_mode || 'linear');
+
+  // ابطال کش پس از بازمحاسبه الگوریتمی کل کاندیداها
+  inlinkGraphService.invalidateProject(projectId);
 }

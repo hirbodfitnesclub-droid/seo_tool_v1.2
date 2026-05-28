@@ -19,6 +19,10 @@ import {
   ChevronUp, ChevronDown, ExternalLink,
   CheckCircle, BarChart2, Globe, Tag, Sparkles
 } from 'lucide-react';
+import { useInlinkAnalytics } from '../hooks/useInlinkAnalytics';
+import InlinkBadge from '../components/InlinkBadge';
+import InlinkModal from '../components/InlinkModal';
+import * as inlinkGraphService from '../services/analysis/inlinkGraphService';
 
 export default function PageDetail() {
   const { projectId, pageId } = useParams<{ projectId: string, pageId: string }>();
@@ -32,6 +36,9 @@ export default function PageDetail() {
   const candidateRec = useLiveQuery(() => candidateRepository.getByPage(pgId), [pgId]);
   const result = useLiveQuery(() => resultRepository.getByPage(pgId), [pgId]);
   const { showToast } = useToast();
+
+  const inlink = useInlinkAnalytics(pId, pgId);
+  const [inlinkModalOpen, setInlinkModalOpen] = useState(false);
 
   const [selectedLinks, setSelectedLinks] = useState<any[]>([]);
   const [analyzing, setAnalyzing] = useState(false);
@@ -92,6 +99,7 @@ export default function PageDetail() {
         is_manual_edit: true,
         generated_at: new Date().toISOString()
       });
+      inlinkGraphService.invalidateProject(pId);
       setIsUnsaved(false);
       showToast({ type: 'success', message: 'تغییرات شما با موفقیت در بانک پیشرفته نتایج ثبت شد.' });
     } catch (err: any) {
@@ -148,6 +156,7 @@ export default function PageDetail() {
               <ArrowRight size={18} className="group-hover:translate-x-1 transition-transform" />
             </Link>
             <Badge variant="blue" className="px-3 py-1 bg-blue-50 text-blue-700 border-blue-100">SEO Workstation</Badge>
+            <InlinkBadge count={inlink.count} loading={inlink.loading} onClick={() => setInlinkModalOpen(true)} />
             {isUnsaved && (
               <span className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-bold rounded-lg bg-yellow-50 text-yellow-700 border border-yellow-100 animate-pulse">
                 * تغییرات ذخیره نشده
@@ -378,6 +387,15 @@ export default function PageDetail() {
            </div>
         </div>
       </div>
+
+      <InlinkModal
+        isOpen={inlinkModalOpen}
+        onClose={() => setInlinkModalOpen(false)}
+        targetTitle={page.title}
+        sources={inlink.sources}
+        loading={inlink.loading}
+        projectId={pId}
+      />
     </div>
   );
 }

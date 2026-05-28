@@ -44,3 +44,14 @@ export async function upsert(result: Result): Promise<void> {
 export async function clearByProject(projectId: number): Promise<void> {
   await db.results.where('project_id').equals(projectId).delete();
 }
+
+/**
+ * دریافت آخرین زمان تولید پیشنهاد برای یک پروژه خاص (از طریق فیلد generated_at)
+ * @param projectId شناسه عددی پروژه
+ * @returns آخرین زمان ایجاد شده به صورت رشته یا null
+ */
+export async function getLatestGeneratedAt(projectId: number): Promise<string | null> {
+  const latest = await db.results.where('project_id').equals(projectId).last();
+  return latest ? latest.generated_at : null;
+}
+

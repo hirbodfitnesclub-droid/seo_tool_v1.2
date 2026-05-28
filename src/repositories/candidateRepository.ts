@@ -39,3 +39,13 @@ export async function clearByProject(projectId: number): Promise<void> {
 export async function countByProject(projectId: number): Promise<number> {
   return db.candidates.where('project_id').equals(projectId).count();
 }
+
+/**
+ * دریافت تمام رکوردهای کاندیدا برای یک پروژه (برای ساخت Reverse Index)
+ * @param projectId شناسه عددی پروژه
+ * @returns تمام رکوردهای کاندیدا یافت شده
+ */
+export async function listByProject(projectId: number): Promise<CandidateRecord[]> {
+  return db.candidates.where('project_id').equals(projectId).toArray();
+}
+
