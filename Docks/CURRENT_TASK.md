@@ -1,156 +1,46 @@
-# CURRENT_TASK.md — پنجره اولویت و تمرکز اجرایی
+# CURRENT_TASK.md — سند تمرکز تسک فعلی
 
-> این سند بر اساس نقشه راه مرجع (`tasks.md`) ساخته شده و وضعیت تمرکز اجرایی فعلی را نشان می‌دهد.
-
----
-
-## فاز جاری: معماری تطبیقی پایپ‌لاین امتیازدهی (R13)
-
-پس از اجرای R12، پروژه‌های بزرگ سریع شدند ولی پروژه‌های کوچک/متوسط (مثلاً ۷۰۰ صفحه) به‌خاطر سربار راه‌اندازی Web Worker و IPC کند شدند. R13 یک شرط ساده اضافه می‌کند تا بر اساس تعداد صفحات یکی از دو مسیر (Fast-Track یا Heavy-Track) انتخاب شود. جزئیات معماری در بخش «Adaptive Scoring Pipeline» در `ARCHITECTURE.md` آمده.
-
----
-
-## تسک جاری: **R13 — Adaptive Scoring Pipeline (Fast-Track / Heavy-Track)**
-
-### وضعیت: **In Progress**
-
-### هدف
-حذف سربار Worker در پروژه‌های کوچک، با حفظ مزیت Worker در پروژه‌های بزرگ. مسیر اجرا بر اساس `pages.length` انتخاب می‌شود.
-
-### قانون انتخاب مسیر (سخت‌گیرانه)
+## ۱. درخت تمرکز (Focus Tree)
 ```
-const SCORING_WORKER_THRESHOLD = 1000;
-
-if (pages.length <= SCORING_WORKER_THRESHOLD) {
-  // Fast-Track — Main Thread, no worker
-} else {
-  // Heavy-Track — Web Worker via computeAllInWorker
-}
+src/
+├── components/
+│   ├── InlinkBadge.tsx        ← [✓ تکمیل شد] کامپوننت Badge شمارنده لینک‌های ورودی به صفحه
+│   └── InlinkModal.tsx        ← [✓ تکمیل شد] کامپوننت مودال نمایش لیست تفصیلی صفحات مبدأ ارجاع‌دهنده
+└── pages/
+    └── PageDetail.tsx         ← [✓ تکمیل شد] ادغام هوک پیگیری لینک‌های ورودی و مدیریت باز شدن مودال + ابطال دستی کش
 ```
 
 ---
 
-## محل تغییر
+## ۲. جزئیات کامل تسک غایی (آخرین تسک)
 
-**فقط یک فایل ویرایش می‌شود:**
-- `src/utils/candidateStorage.ts`
+### تسک F1.3 — UI: Badge شمارنده + مودال لینک‌های ورودی در PageDetail [✓ ۱۰۰٪ تکمیل گردید]
 
-**فایل‌های دیگری که فقط خوانده می‌شوند (برای فهم contract، نه ویرایش):**
-- `src/core/scoring/idfCalculator.ts` — تابع `computeIDFMap(pages)` و تایپ `IDFMap`، `PageLike`
-- `src/core/scoring/scorer.ts` — تابع `computeAllCandidates(pages)` و تایپ `CandidateWithTags`
-- `src/services/scoring/scoringService.ts` — تابع `computeAllInWorker(pages)` (مسیر Heavy فعلی)
-- `src/repositories/idfRepository.ts` — متد `upsertInTx`
-- `src/repositories/candidateRepository.ts` — متدهای `clearByProject`, `bulkAdd`
+#### اهداف تحقق یافته:
+۱. **پیاده‌سازی ماژولار کامپوننت `InlinkBadge.tsx`**:
+   - بهینه‌سازی شده برای سه لایه پردازش: (loading, count === 0, count > 0).
+   - متصل شده به افکت‌های حرکتی و زیباشناختی با تم رنگ اختصاصی Emerald/Blue.
 
-**هیچ فایل دیگری در این تسک ویرایش نمی‌شود. هیچ فایل جدیدی ساخته نمی‌شود.**
+۲. **پیاده‌سازی ماژولار کامپوننت `InlinkModal.tsx`**:
+   - یکپارچه‌ساز با قالب بومی `Modal` پروژه.
+   - دارای استراتژی ساده Virtualization (نمایش حداکثر ۱۰۰ مرجع برتر به منظور پیشگیری از مسدودسازی Main Thread).
+   - نمایش جزییات فیلد امتیاز با دقت دو رقم اعشار، خاستگاه ارجاع و نهایتاً تگ‌های مرتبط (محدود به ۵ مورد اول جهت صیانت از کارایی لایه DOM).
 
----
-
-## راهنمای پیاده‌سازی فنی (گام‌به‌گام)
-
-### گام ۱ — افزودن import های Core
-در بالای `src/utils/candidateStorage.ts`، علاوه بر import های موجود، این دو را اضافه کن (مسیرها را با ساختار فعلی پروژه تطبیق بده — هر دو فایل قبلاً در `src/core/scoring/` موجودند):
-```ts
-import { computeIDFMap } from '../core/scoring/idfCalculator';
-import { computeAllCandidates, type CandidateWithTags } from '../core/scoring/scorer';
-```
-> توجه: `computeAllInWorker` همچنان import باقی می‌ماند چون در شاخه Heavy استفاده می‌شود.
-
-### گام ۲ — تعریف ثابت آستانه
-بلافاصله بعد از import ها، این ثابت را در سطح ماژول تعریف کن:
-```ts
-// آستانه انتخاب موتور پردازش: زیر این مقدار، اجرای مستقیم روی Main Thread (Fast-Track)
-const SCORING_WORKER_THRESHOLD = 1000;
-```
-
-### گام ۳ — بازنویسی بدنه `computeAndStoreCandidates`
-ساختار جدید تابع باید **دقیقاً** این جریان را داشته باشد:
-
-```ts
-export async function computeAndStoreCandidates(
-  projectId: number,
-  pages: Page[],
-  _weights: Record<string, number>,
-  _mode: 'linear' | 'weighted'
-): Promise<void> {
-
-  // ۱. آماده‌سازی pages با categories پارس‌شده — یک‌بار، مشترک بین دو مسیر
-  const pagesWithId = pages.map(p => ({
-    id: p.id!,
-    title: p.title,
-    categories: typeof p.categories === 'string' ? JSON.parse(p.categories) : p.categories
-  }));
-
-  // ۲. انتخاب مسیر بر اساس تعداد صفحات
-  let idfMap;
-  let candidatesMap: Map<number, CandidateWithTags[]>;
-
-  if (pagesWithId.length <= SCORING_WORKER_THRESHOLD) {
-    // ── Fast-Track: اجرای مستقیم روی Main Thread، بدون Worker ──
-    idfMap = computeIDFMap(pagesWithId);
-    candidatesMap = computeAllCandidates(pagesWithId);
-  } else {
-    // ── Heavy-Track: ارسال به Web Worker (همان مسیر R12) ──
-    const result = await computeAllInWorker(pagesWithId);
-    idfMap = result.idfMap;
-    candidatesMap = result.candidatesMap;
-  }
-
-  // ۳. آماده‌سازی رکوردها (مشترک)
-  const now = new Date().toISOString();
-  const records = Array.from(candidatesMap.entries()).map(([pageId, list]) => ({
-    project_id: projectId,
-    source_page_id: pageId,
-    candidate_list: JSON.stringify(list),
-    computed_at: now
-  }));
-
-  // ۴. ذخیره در یک تراکنش واحد — بدون تغییر نسبت به R12
-  await db.transaction('rw', [db.idfCache, db.candidates], async () => {
-    await idfRepository.upsertInTx(projectId, JSON.stringify(idfMap));
-    await candidateRepository.clearByProject(projectId);
-    await candidateRepository.bulkAdd(records);
-  });
-}
-```
-
-### گام ۴ — تأیید signature و سایر export ها
-- signature تابع `computeAndStoreCandidates` نباید تغییر کند.
-- تابع `getCachedIDF` در همان فایل دست‌نخورده باقی می‌ماند.
-- import `computeAllInWorker` نباید حذف شود (هنوز در Heavy-Track استفاده می‌شود).
+۳. **ادغام در `PageDetail.tsx`**:
+   - نصب و اتصال موفق به هوک `useInlinkAnalytics`.
+   - ایجاد تریگر دستی ابطال حافظه کش موقت در بخش ذخیره‌سازی پیکربندی‌های دستی کاربر (`handleSaveManual`) جهت به‌روزرسانی آنی تغییرات پس از بازگشت به صفحات مقصد.
+   - تضمین عدم وجود حتی یک خطا در پروسه ساخت نهایی و ممیزی وب.
 
 ---
 
-## محدودیت‌های اختصاصی این تسک (سخت‌گیرانه)
-
-- ✅ فقط `src/utils/candidateStorage.ts` ویرایش می‌شود.
-- ✅ خروجی Dexie (`idfCache.idf_map` و `candidates.candidate_list`) باید **بایت-به-بایت یکسان** با حالت R12 باقی بماند، صرف‌نظر از مسیر اجرا. توابع core همان توابعی هستند که قبلاً در ورکر صدا زده می‌شدند.
-- ✅ هیچ تغییری در `scorer.ts`، `idfCalculator.ts`، `scoringService.ts`، یا `scoringWorker.ts` انجام نشود.
-- ✅ مقدار آستانه (`SCORING_WORKER_THRESHOLD = 1000`) صرفاً یک ثابت محلی بالای فایل است — وارد config یا env نشود.
-- ✅ هیچ console.log اضافه نشود مگر یک خط `console.log('[v0] scoring path', pagesWithId.length, pagesWithId.length <= SCORING_WORKER_THRESHOLD ? 'fast' : 'heavy')` برای debug که بعد از تأیید کاربر حذف خواهد شد.
-- ⛔ هیچ try/catch اضافه گرد scoring اضافه نکن — اگر در Fast-Track exception رخ داد، باید بالا برود (همان رفتار قبلی).
-- ⛔ هیچ تغییر در ترتیب آرگومان‌های `computeIDFMap` یا `computeAllCandidates`. این توابع pure هستند و pages را همان شکلی که computeAllInWorker می‌گیرد می‌گیرند.
-- ⛔ async/await اضافه روی توابع sync core نگذار. آن‌ها sync هستند و باید sync صدا زده شوند.
-- ⛔ هیچ پیش‌بارگذاری/pre-warm Worker در main.tsx تغییر نکند. در پروژه‌های کوچک Worker اصلاً ساخته نمی‌شود ولی pre-warm فعلی مشکلی ایجاد نمی‌کند (idle import).
+## ۳. وضعیت کلان نقشه راه
+- **تسک F1.1 [✓ صد در صد تکمیل شد]:** زیرساخت Reverse Index Service
+- **تسک F1.2 [✓ صد در صد تکمیل شد]:** هوک `useInlinkAnalytics` + اتصال به analysisService
+- **تسک F1.3 [✓ صد در صد تکمیل شد]:** طراحی رابط کاربری (UI) و ادغام Badge و مودال ارجاعات در صفحه جزئیات لندینگ
 
 ---
 
-## معیار پذیرش
-
-1. آپلود CSV با ~۷۰۰ صفحه → ورود به صفحه پروژه در زیر ۱.۵ ثانیه.
-2. کلیک «بررسی الگوریتم» روی همان پروژه → اتمام در زیر ۱.۵ ثانیه.
-3. پروژه با > ۱۰۰۰ صفحه همچنان از Worker استفاده می‌کند و UI freeze نمی‌شود.
-4. خروجی `candidates` و `idfCache` در Dexie برای یک پروژه ثابت بین Fast-Track و Heavy-Track یکسان است (با تغییر آستانه به مقادیر متفاوت و مقایسه تست شود).
-5. `tsc --noEmit` بدون خطا.
-
----
-
-## رله کانتکست (Context Relay)
-
-- **چرا این تسک لازم شد:** R12 سربار IPC را برای پروژه‌های بزرگ کم کرد، ولی برای پروژه‌های کوچک/متوسط، هزینه ثابت ساخت Worker (~۲–۴ ثانیه در dev mode Vite) خودش گلوگاه شد.
-- **چرا Fast-Track امن است:** توابع core در R4 از وابستگی DOM/Dexie/React جدا شدند. اجرای آن‌ها روی Main Thread برای ≤۱۰۰۰ صفحه چند صد میلی‌ثانیه طول می‌کشد، که بسیار کمتر از سربار راه‌اندازی Worker است.
-- **قانون مطلق:** الگوریتم scorer و خروجی عددی آن یک کاراکتر هم تغییر نمی‌کند. این تسک فقط یک شاخه `if/else` اضافه می‌کند.
-
-`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/utils/candidateStorage.ts", "src/services/scoring/scoringService.ts", "src/core/scoring/scorer.ts", "src/core/scoring/idfCalculator.ts", "src/repositories/idfRepository.ts", "src/repositories/candidateRepository.ts"]`
-
-> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان فایل‌های کانتکست را با ابزار خواندن باز کن و بخوان، سپس کد این تسک را بزن.
+## ۴. گام بعدی (Next Steps)
+- پروژه و ویژگی‌های پیاده‌سازی شده در پایداری کامل به سر می‌برند.
+- تمام ویژگی‌های فاز ۲ (توسعه ویژگی گراف معکوس لینک‌سازی هوشمند) بایت‌به‌بایت بر اساس استانداردهای مشخص شده پیاده‌سازی و یکپارچه شده‌اند.
+- آمادگی کامل جهت استقرار نهایی برنامه و یا بازبینی نهایی معمار سیستم.
