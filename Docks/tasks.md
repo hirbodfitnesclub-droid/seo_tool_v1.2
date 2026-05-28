@@ -222,7 +222,7 @@
 ### هدف
 وقتی کاربر در میان پردازش تب را می‌بندد و دوباره باز می‌کند، صف‌هایی که status='processing' دارند ولی updated_at آن‌ها قدیمی است باید به وضعیت 'paused' تبدیل شوند تا کاربر بتواند آگاهانه resume کند.
 
-### راهنمای پیاده‌سازی فن������
+### راهنمای پیاده‌سازی فن��������
 ۱. `src/repositories/queueRepository.ts` (از تسک R1) — متد `findInterrupted()` را پیاده کن:
    - تمام رکوردهای `status === 'processing'` که `updated_at` آن‌ها بیش از ۳۰ ثانیه از زمان فعلی فاصله دارد را بازگرداند.
 
@@ -317,7 +317,7 @@
 ## تسک R10 — پاک‌سازی نهایی، حذف شیم‌ها و فایل‌های تکراری
 
 ### ��دف
-بعد از پایداری تسک‌های R1..R9، شیم‌های موقتی و کپی‌های تکراری حذف می‌شوند.
+بعد از پای��اری تسک‌های R1..R9، شیم‌های موقتی و کپی‌های تکراری حذف می‌شوند.
 
 ### راهنمای پیاده‌سازی فنی
 ۱. پوشه ریشه‌ای `/utils/` (که حاوی نسخه قدیمی فایل‌هاست — `utils/scorer.ts`, `utils/queueProcessor.ts`, ...) را به‌طور کامل **حذف کن**. این فایل‌ها هیچ‌جا import نمی‌شوند (با grep تأیید کن).
@@ -921,7 +921,7 @@ F1.1 (Reverse Index Service)
        ```
      - برای هر ردیف:
        - `safeParse` کن. اگر invalid → `errors.push(`ردیف ${i+1}: ستون اجباری خالی است`)` و skip.
-       - `parseJalaliDate(startStr)` و `parseJalaliDate(endStr)`. اگر `null` → `errors.push(`ردیف ${i+1}: فرمت تاریخ نامعتبر`)` و skip.
+       - `parseJalaliDate(startStr)` و `parseJalaliDate(endStr)`. ��گر `null` → `errors.push(`ردیف ${i+1}: فرمت تاریخ نامعتبر`)` و skip.
        - keywords را با `.split('|').map(k => k.trim().toLowerCase()).filter(Boolean)` پردازش کن.
        - اگر keywords خالی → خطا و skip.
        - `id = `csv-${Date.now()}-${i}``, `source: 'csv'`.
@@ -1176,6 +1176,145 @@ F2.1 (Calendar + Constants)
 ```
 
 F2.2 و F2.3 می‌توانند موازی نباشند — F2.3 به تایپ‌های F2.2 وابسته است.
+
+---
+
+## تسک F2.7 — رفع باگ Year-Wrap + جریمه سنگین برای صفحات زمان‌دارِ منقضی/دور
+
+### مسئله (Real-World Bug — خرداد ۱۴۰۴)
+در حال حاضر در اواخر بهار، فعال‌سازی Live Boost برای «تور کیش مهر» باعث می‌شود «تور کیش نوروز» (که تاریخش در گذشته است) در رتبه ۶ ظاهر شود. سه ریشه:
+1. تابع `projectEventToCurrentYear` پس از پایان رویدادِ امسال، بلافاصله آن را به سال بعد می‌فرستد → `daysToStart` بزرگ می‌شود → `classifyEventTiming` `null` می‌دهد → کاندیدا از مسیر جریمه فرار می‌کند.
+2. تابع `detectOutOfSeason` فقط چهار نام فصل را می‌گردد، پس کلمه «نوروز» با هیچ‌یک از `بهار/تابستان/...` مطابقت نمی‌کند → جریمه ×0.15 نیز اعمال نمی‌شود.
+3. هیچ‌جا «زمان‌دار بودن کاندیدا» به‌عنوان یک شرط مستقل تشخیص داده نمی‌شود؛ در نتیجه نه می‌توان جریمه سنگین را هدفمند به آن‌ها تخصیص داد و نه می‌توان از جریمه‌شدن صفحات غیر زمان‌دار جلوگیری کرد.
+
+### هدف
+بازطراحی هسته منطق ارزیابی زمانی در `temporalService.ts` به‌گونه‌ای که:
+- **یک تابع جدید** `evaluateEventTiming(event, today)` جایگزین زوج معیوب `projectEventToCurrentYear` + `classifyEventTiming` شود و ریاضیات سال (Year-Aware) را به‌صورت بی‌رحم پیاده کند.
+- **یک تابع جدید** `isCandidateSeasonal(keywords, events)` به‌صراحت تشخیص دهد یک کاندیدا «زمان‌دار» است یا نه.
+- **برچسب‌های جدید** `'expired'` و `'too-far'` با ضریب ×0.001 (Devastating Penalty) معرفی شوند.
+- خروجی `applyTemporalBoost` تضمین کند کاندیدای منقضی هرگز در ۱۰ پیشنهاد بالا نیاید (ریاضیات: حتی برای حداکثر `score=10000`، `score × 0.001 = 10` که از هر کاندیدای neutral پایین‌تر است).
+
+### راهنمای پیاده‌سازی فنی
+
+۱. **افزودن برچسب‌های جدید به تایپ:**
+   ```ts
+   export type TemporalLabel = 'pre' | 'current' | 'neutral' | 'out-of-season' | 'expired' | 'too-far';
+   ```
+   و ضرایب مجاز:
+   ```ts
+   temporalMultiplier: 4 | 3 | 1 | 0.15 | 0.001;
+   ```
+   هر دو در `BoostedCandidate` به‌روزرسانی می‌شوند. (همچنین در `Docks/ARCHITECTURE.md` بخش ۱۰ سند معمار به‌روزرسانی شده.)
+
+۲. **حذف دو تابع معیوب:**
+   - `projectEventToCurrentYear`
+   - `classifyEventTiming`
+   (هیچ مصرف‌کننده دیگری ندارند — فقط داخل `applyTemporalBoost` استفاده می‌شدند.)
+
+۳. **افزودن تابع `evaluateEventTiming`:**
+   ```ts
+   /**
+    * ارزیابی وضعیت یک رویداد منطبق نسبت به تاریخ امروز با حساسیت کامل به سال (Year-Aware).
+    * این تابع جایگزین projectEventToCurrentYear + classifyEventTiming است
+    * و باگ Year-Wrap را به‌صورت ریشه‌ای رفع می‌کند.
+    */
+   function evaluateEventTiming(
+     event: TemporalEvent,
+     today: JalaliDate
+   ): {
+     label: 'pre' | 'current' | 'expired' | 'too-far';
+     multiplier: 4 | 3 | 0.001;
+     reason: string;
+   } {
+     // گام ۱: ساخت بازه امسال
+     const thisYearStart: JalaliDate = { year: today.year, month: event.startDate.month, day: event.startDate.day };
+     const crossYear = event.endDate.month < event.startDate.month;
+     const thisYearEnd: JalaliDate = {
+       year: today.year + (crossYear ? 1 : 0),
+       month: event.endDate.month,
+       day: event.endDate.day,
+     };
+
+     // گام ۲: امروز در بازه؟ → current
+     if (isJalaliInRange(today, thisYearStart, thisYearEnd)) {
+       return { label: 'current', multiplier: 3, reason: `در حال برگزاری: ${event.name}` };
+     }
+
+     const daysToStart = jalaliDaysBetween(today, thisYearStart);
+     const daysToEnd = jalaliDaysBetween(today, thisYearEnd);
+
+     // گام ۳: شروع امسال در آینده نزدیک (تا ۶۰ روز)؟ → pre
+     if (daysToStart >= 0 && daysToStart <= 60) {
+       return { label: 'pre', multiplier: 4, reason: `پیش‌واز ${event.name} — ${daysToStart} روز مانده` };
+     }
+
+     // گام ۴: شروع امسال خیلی دور (> ۶۰ روز)؟ → too-far
+     if (daysToStart > 60) {
+       return { label: 'too-far', multiplier: 0.001, reason: `خارج از پنجره: ${event.name} (${daysToStart} روز فاصله)` };
+     }
+
+     // گام ۵: رویداد امسال تمام شده. بررسی پنجره سال بعد.
+     // daysToEnd < 0 یعنی پایان امسال هم گذشته.
+     const nextYearStart: JalaliDate = { year: today.year + 1, month: event.startDate.month, day: event.startDate.day };
+     const daysToNextStart = jalaliDaysBetween(today, nextYearStart);
+
+     if (daysToNextStart >= 0 && daysToNextStart <= 60) {
+       return { label: 'pre', multiplier: 4, reason: `پیش‌واز ${event.name} سال بعد — ${daysToNextStart} روز مانده` };
+     }
+
+     // در غیر این‌صورت، رویداد منقضی است (هنوز وارد پنجره ۶۰ روزه سال بعد نشده).
+     return { label: 'expired', multiplier: 0.001, reason: `منقضی: ${event.name} (${Math.abs(daysToEnd)} روز پس از پایان)` };
+   }
+   ```
+
+۴. **افزودن تابع `isCandidateSeasonal`:**
+   ```ts
+   /**
+    * تشخیص می‌دهد کاندیدا با هیچ‌یک از کلیدواژه‌های مجموعه رویدادها/فصل‌ها مطابقت دارد.
+    * شرط لازم برای واجد شرایط بودن جهت جریمه سنگین expired/too-far.
+    */
+   function isCandidateSeasonal(keywords: string[], events: TemporalEvent[]): boolean {
+     for (const event of events) {
+       if (matchEventToKeywords(event, keywords)) return true;
+     }
+     return false;
+   }
+   ```
+
+۵. **بازنویسی حلقه اصلی در `applyTemporalBoost`:**
+   - برای هر کاندیدا `keywords` را استخراج کن.
+   - اگر `isCandidateSeasonal(keywords, events) === false` → `temporalLabel='neutral', multiplier=1`. **هرگز جریمه سنگین نگیرد.** (این نکته حیاتی است: «تور کیش» عمومی نباید فقط چون با هیچ رویدادی منطبق نیست به ×0.001 بیفتد.)
+   - در غیر این‌صورت برای هر event منطبق `evaluateEventTiming` را صدا بزن.
+   - **انتخاب نتیجه:** قانون بی‌رحم — اگر حداقل یک نتیجه `multiplier === 0.001` باشد، همان برنده است (Devastating wins). دلیل: «تور کیش نوروز» با هم به نوروزِ منقضی match می‌کند هم به فصل بهار. اگر بهار را برنده اعلام کنیم، باز در بالای لیست می‌افتد. باید نوروز منقضی برنده باشد. در غیر این‌صورت، بزرگ‌ترین `multiplier` برنده است (×4 > ×3 > ×1).
+   - **حذف منطق `detectOutOfSeason` به‌عنوان مسیر اصلی:** چون حالا فصل‌ها هم به‌عنوان event در `BUILT_IN_TEMPORAL_EVENTS` ثبت شده‌اند و خود `evaluateEventTiming` آن‌ها را به `expired/too-far` تبدیل می‌کند، این تابع redundant می‌شود. اما برای backward compatibility و در حالتی که هیچ event در سیستم نباشد، می‌تواند به‌عنوان fallback نگه داشته شود (اختیاری).
+
+۶. **به‌روزرسانی منطق سهمیه‌بندی (Quota):**
+   - منطق سهمیه فعلی فقط `multiplier > 1` را برمی‌داشت. تغییر دهد به: کاندیداهای `multiplier === 0.001` **هرگز** در صف سهمیه قرار نمی‌گیرند و در نهایت در انتهای لیست (پس از مرتب‌سازی boostedScore نزولی) قرار می‌گیرند — که دقیقاً هدف بیزینسی است.
+   - بقیه منطق سهمیه دست‌نخورده.
+
+### محدودیت‌ها
+- ✅ بدون تغییر `scorer.ts`، `db.ts`، `BUILT_IN_TEMPORAL_EVENTS` (constants).
+- ✅ بدون نصب کتابخانه جدید.
+- ✅ امضای `applyTemporalBoost` بدون تغییر (backward compatible).
+- ✅ تابع جدید `evaluateEventTiming` Pure است (هیچ side-effect، هیچ Date.now() مستقیم).
+- ⛔ بدون لمس UI (PageDetail/Config) در این تسک. لایه نمایش اگر `temporalLabel === 'expired' | 'too-far'` بود همان رنگ قرمز فعلی `out-of-season` را نمایش می‌دهد — در یک تسک UI جداگانه می‌توان رنگ متمایز اضافه کرد (out of scope).
+
+### معیار پذیرش (تست سناریوی واقعی)
+1. **سناریوی باگ:** `today = ۱۴۰۴/۰۳/۰۷` (۷ خرداد). کاندیدای «تور کیش نوروز» با کلیدواژه‌های `['تور کیش نوروز', 'نوروز', ...]`:
+   - بازه نوروز امسال: `1404/12/28 → 1405/01/13`. `daysToStart` با امروز ۷ خرداد = **حدود ۲۹۰ روز** (خیلی دور). آیا → `too-far` با `multiplier=0.001`؟ ✅
+   - چون این کاندیدا نوروز را هم match می‌کند، `evaluateEventTiming` برای رویداد نوروز → `too-far` (×0.001). برنده می‌شود. ✅
+2. **سناریوی healthy:** `today = ۱۴۰۴/۰۳/۰۷`. کاندیدای «تور توچال تابستان» → رویداد تابستان match می‌شود، شروع `1404/04/01`. `daysToStart` ≈ ۲۴ روز → `pre` با `multiplier=4`. ✅
+3. **سناریوی غیر زمان‌دار:** کاندیدای «تور کیش» (بدون کلمه زمانی). `isCandidateSeasonal === false` → `neutral × 1`. ✅
+4. **سناریوی year-wrap legitimate:** `today = ۱۴۰۴/۱۲/۲۰`. کاندیدای «تور نوروز». بازه `1404/12/28 → 1405/01/13`. `daysToStart` ≈ ۸ روز → `pre × 4`. ✅
+5. **سناریوی expired-near:** `today = ۱۴۰۴/۰۱/۲۰`. کاندیدای «تور نوروز». بازه `1403/12/28 → 1404/01/13` که تمام شده. سال بعد `1404/12/28` → `daysToNextStart` ≈ ۳۴۰ روز → `expired × 0.001`. ✅
+6. `tsc --noEmit` بدون خطا.
+7. در UI، با Live Boost روشن، «تور کیش نوروز» در ۷ خرداد در ۲۰ پیشنهاد بالا دیده نمی‌شود.
+
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "Docks/PROJECT.md", "src/services/temporal/temporalService.ts", "src/services/temporal/jalaliCalendar.ts", "src/constants/temporalSeasons.ts"]`
+
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان با ابزار calling_tool فایل‌های کانتکست را به‌صورت زنده فراخوانی کن، بخوان، سپس کد را بنویس. هیچ تابعی را بدون دیدن source واقعی‌اش حذف نکن.
+
+---
 
 ## معیار پذیرش کل فیچر F2
 

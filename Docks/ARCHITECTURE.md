@@ -517,34 +517,85 @@ export function useInlinkAnalytics(projectId: number, targetPageId: number): {
 └───────────────────────────────────────────────────────────────┘
 ```
 
-### قواعد محاسبه (Decision Tree برای هر کاندیدا)
+### قواعد محاسبه (Decision Tree برای هر کاندیدا — اصلاح‌شده با رفع باگ Year-Wrap)
 
 ورودی برای هر کاندیدا: `targetTitle`, `targetCategories` (از `pages.categories` — یا تگ‌های موجود در candidate). در زمان فعلی شمسی `today = { year, month, day }` ثابت است (یک‌بار محاسبه می‌شود).
 
 ```
-برای هر event فعال (CSV + built-in):
-  match = آیا یکی از event.keywords در targetTitle یا targetCategories هست؟
-  if !match: continue
-  
-  اگر today در بازه [event.startDate, event.endDate]:
+گام ۰ — تشخیص «زمان‌دار بودن کاندیدا» (Seasonality Detection):
+  isCandidateSeasonal = آیا حداقل یک کلمه‌کلیدی از مجموعه‌ی همه رویدادها/فصل‌ها
+                       در targetTitle یا targetCategories ظاهر شده؟
+  اگر FALSE → کاندیدا غیر زمان‌دار است → خروجی neutral (×1) و توقف.
+  اگر TRUE → ادامه به گام ۱.
+
+گام ۱ — یافتن «بهترین رویداد منطبق» (Best Matching Event):
+  matchedEvents = همه eventهایی که حداقل یک keyword آن‌ها در کاندیدا هست.
+  اگر هیچ event matched نشد ولی کاندیدا کلیدواژه فصلیِ خام دارد:
+    ⇒ منطق fallback خارج-از-فصلِ سبک (×0.15) — همان رفتار قبلی برای حالت‌های گنگ.
+
+گام ۲ — برای هر event matched، محاسبه وضعیت زمانی با ریاضیات Jalali بی‌رحم:
+
+  thisYearStart = { year: today.year, month: event.startDate.month, day: event.startDate.day }
+  thisYearEnd   = { year: today.year + (cross-year-rollover ? 1 : 0),
+                    month: event.endDate.month, day: event.endDate.day }
+
+  daysToStart = jalaliDaysBetween(today, thisYearStart)   // مثبت: آینده
+  daysToEnd   = jalaliDaysBetween(today, thisYearEnd)     // مثبت: هنوز در راه است
+
+  اگر today ∈ [thisYearStart, thisYearEnd]:
     ⇒ status = 'current', multiplier = 3
-  
-  وگرنه اگر event.startDate - today در [۳۰, ۶۰] روز:
-    ⇒ status = 'pre', multiplier = 4
-  
-  وگرنه:
-    ⇒ skip (این event بر این کاندیدا اثر ندارد)
 
-اگر هیچ event matched نشد ولی کاندیدا حداقل یک کلمه‌کلیدی فصلی/مناسبتی دارد
-که الان «خارج از فصل» است (مثلاً «بهار» در پاییز):
-  ⇒ status = 'out-of-season', multiplier = 0.15
+  وگرنه اگر daysToStart ∈ [0, 60]:
+    ⇒ اگر daysToStart ∈ [30, 60]: status = 'pre',  multiplier = 4
+    ⇒ اگر daysToStart ∈ [0, 29]:  status = 'pre',  multiplier = 4 (پیش‌واز نزدیک)
 
-در غیر اینصورت:
-  ⇒ status = 'neutral', multiplier = 1
+  وگرنه اگر daysToEnd < 0  (رویداد امسال تمام شده):
+    nextYearStart = { year: today.year + 1, month, day }
+    daysToNextStart = jalaliDaysBetween(today, nextYearStart)
+    اگر daysToNextStart <= 60:
+      ⇒ status = 'pre', multiplier = 4   // وارد پنجره سال بعد شده
+    وگرنه:
+      ⇒ status = 'expired', multiplier = 0.001  ← Devastating Penalty
 
-بهترین event match = بالاترین multiplier (priority: pre > current > neutral > out-of-season)
-وقتی هم pre و هم current match شدند، pre برنده است (multiplier = 4).
+  وگرنه اگر daysToStart > 60  (هنوز خیلی دور است):
+    ⇒ status = 'too-far', multiplier = 0.001    ← Devastating Penalty
+
+گام ۳ — انتخاب نهایی:
+  از میان همه eventهای matched، آن که بدترین وضعیت را تولید کرده برنده است
+  (priority برای جریمه: expired/too-far > out-of-season > neutral < current < pre)
+  *قانون بی‌رحمی:* اگر حداقل یک event دارای multiplier = 0.001 باشد، همان برنده است
+  حتی اگر event دیگری ×3 یا ×4 پیشنهاد دهد. دلیل: کاندیدا «تور کیش نوروز» نباید
+  از طریق match با فصل «بهار» از جریمه نوروزِ منقضی فرار کند.
 ```
+
+### تابع جدید Pure در `temporalService.ts`
+
+```ts
+// ارزیابی یک رویداد منطبق با حساسیت کامل به سال (year-aware)
+// خروجی: وضعیت زمانی + ضریب + دلیل فارسی
+function evaluateEventTiming(
+  event: TemporalEvent,
+  today: JalaliDate
+): {
+  label: TemporalLabel;            // 'pre' | 'current' | 'expired' | 'too-far'
+  multiplier: 4 | 3 | 1 | 0.15 | 0.001;
+  reason: string;
+}
+```
+
+این تابع جایگزین زوج `projectEventToCurrentYear` + `classifyEventTiming` می‌شود (هر دو حذف می‌شوند چون منشأ باگ Year-Wrap بودند).
+
+### تابع جدید تشخیص زمان‌دار بودن کاندیدا
+
+```ts
+// آیا این کاندیدا اساساً زمان‌دار است؟ (شرط لازم برای ورود به مسیر جریمه سنگین)
+function isCandidateSeasonal(
+  candidateKeywords: string[],
+  events: TemporalEvent[]
+): boolean
+```
+
+اگر `false` برگرداند، هیچ‌گاه `multiplier = 0.001` اعمال نمی‌شود — صفحه‌ای مثل «تور کیش» (بدون کلیدواژه زمانی) همیشه `neutral ×1` می‌گیرد.
 
 ### فصل‌ها و ماه‌های Built-in
 
@@ -586,7 +637,7 @@ export function jalaliDaysBetween(a: JalaliDate, b: JalaliDate): number; // b - 
 export function isJalaliInRange(d: JalaliDate, start: JalaliDate, end: JalaliDate): boolean;
 
 // src/services/temporal/temporalService.ts
-export type TemporalLabel = 'pre' | 'current' | 'neutral' | 'out-of-season';
+export type TemporalLabel = 'pre' | 'current' | 'neutral' | 'out-of-season' | 'expired' | 'too-far';
 
 export interface TemporalEvent {
   id: string;             // uuid کوتاه یا hash
@@ -605,7 +656,7 @@ export interface BoostedCandidate {
   matched_tags: string[];
   // ضمائم F2:
   boostedScore: number;
-  temporalMultiplier: 4 | 3 | 1 | 0.15;
+  temporalMultiplier: 4 | 3 | 1 | 0.15 | 0.001;
   temporalLabel: TemporalLabel;
   temporalReason: string;
   matchedEventName: string | null;
