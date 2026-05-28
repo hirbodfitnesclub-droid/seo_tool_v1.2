@@ -2,6 +2,7 @@ import React from 'react';
 import { Badge } from './ui/Badge';
 import { Plus, Check, Target } from 'lucide-react';
 import { motion } from 'motion/react';
+import { TemporalBadge } from './TemporalBadge';
 
 interface CandidateCardProps {
   candidate: {
@@ -17,6 +18,11 @@ interface CandidateCardProps {
       jaccardScore: number;
       titleScore: number;
     };
+    boostedScore?: number;
+    temporalMultiplier?: number;
+    temporalLabel?: 'pre' | 'current' | 'neutral' | 'out-of-season';
+    temporalReason?: string;
+    matchedEventName?: string | null;
   };
   isSelected: boolean;
   onToggle: () => void;
@@ -24,11 +30,14 @@ interface CandidateCardProps {
 }
 
 export const CandidateCard: React.FC<CandidateCardProps> = React.memo(({ candidate, isSelected, onToggle, index }) => {
-  // محاسبه درصد تشابه بر اساس امتیاز ۱ تا ۱۰
-  const similarityPercent = Math.min(Math.round(candidate.score * 10), 100);
+  // استفاده از امتیاز افزایش‌یافته (boostedScore) در صورت فعال بودن هوشمندسازی فصلی
+  const activeScore = candidate.boostedScore !== undefined ? candidate.boostedScore : candidate.score;
+  const similarityPercent = Math.min(Math.round(activeScore * 10), 100);
   
   // اولویت‌بندی عددی، اگر از قبل رتبه ذخیره نشده باشد، از ایندکس ردیف استفاده می‌شود
   const displayRank = candidate.rank ?? (index !== undefined ? index + 1 : undefined);
+
+  const hasTemporalBoost = candidate.temporalMultiplier !== undefined && candidate.temporalMultiplier !== 1;
 
   return (
     <motion.div 
@@ -38,7 +47,7 @@ export const CandidateCard: React.FC<CandidateCardProps> = React.memo(({ candida
         isSelected 
           ? 'bg-blue-50/50 border-blue-200 ring-2 ring-blue-500/20' 
           : 'bg-white border-gray-100 hover:border-gray-250 hover:shadow-md'
-      }`}
+      } ${hasTemporalBoost ? 'pb-10' : ''}`} // اضافه کردن فضای عمودی در انتهای کارت برای جلوگیری از تداخل با نشانگر بی‌آزار ترجیحی
       onClick={onToggle}
     >
       <div className="flex justify-between items-start gap-4">
@@ -55,8 +64,13 @@ export const CandidateCard: React.FC<CandidateCardProps> = React.memo(({ candida
             )}
             
             {/* نمایش امتیاز ۱ تا ۱۰ با اعداد انگلیسی تایید شده */}
-            <span className="text-[10px] font-bold text-blue-600 bg-blue-50/70 px-1.5 py-0.5 rounded-md">
-              امتیاز: {candidate.score}/10
+            <span className="text-[10px] font-bold text-blue-600 bg-blue-50/70 px-1.5 py-0.5 rounded-md flex items-center gap-1">
+              <span>امتیاز:</span>
+              <span className="font-extrabold">{activeScore.toFixed(1)}</span>
+              <span>/ 10</span>
+              {hasTemporalBoost && (
+                <span className="text-[8px] text-gray-400 font-semibold">(خام: {candidate.score.toFixed(1)})</span>
+              )}
             </span>
           </div>
           <h4 className="font-bold text-[13px] text-gray-900 leading-tight mb-2 truncate group-hover:text-blue-600 transition-colors">
@@ -119,6 +133,14 @@ export const CandidateCard: React.FC<CandidateCardProps> = React.memo(({ candida
           {isSelected ? <Check size={14} /> : <Plus size={14} />}
         </div>
       </div>
+      {/* نشانگر هوشمند زمانی فصلی */}
+      {hasTemporalBoost && candidate.temporalLabel && candidate.temporalMultiplier && (
+        <TemporalBadge 
+          label={candidate.temporalLabel} 
+          multiplier={candidate.temporalMultiplier} 
+          reason={candidate.temporalReason} 
+        />
+      )}
     </motion.div>
   );
 });

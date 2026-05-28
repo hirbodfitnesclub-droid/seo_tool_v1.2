@@ -14,6 +14,7 @@ import { computeAndStoreCandidates } from '../../utils/candidateStorage';
 import { buildSinglePagePrompt } from '../api/promptBuilder';
 import { callGemini } from '../api/geminiClient';
 import { safeJsonParse } from '../../utils/safeJson';
+import { applyTemporalBoost, sortByBoostedScore } from '../temporal/temporalService';
 
 /**
  * شروع فرآیند تحلیل کل صفحات یک پروژه
@@ -75,16 +76,21 @@ export async function startProjectAnalysis(
 }
 
 /**
- * شبیه‌سازی و بررسی تحلیل هوشمند برای تک صفحه منحصربه‌فرد بر اساس ۳۰ کاندیدای برتر
+ * شبیه‌سازی و بررسی تحلیل هوشمند برای تک صفحه منحصربه‌فرد بر اساس ۳۰ کاندیدای برتر و بهبود یافته فصلی
  * @param projectId شناسه عددی پروژه
  * @param pageId شناسه عددی صفحه مبدأ
  * @param model مدل انتخابی هوش مصنوعی
+ * @param temporalOptions اختیاری: تنظیمات کانتکست فعال‌سازی و رویدادهای زمانی فصلی
  * @returns لیست لینک‌های پیشنهادی هوش مصنوعی
  */
 export async function runSinglePageAnalysis(
   projectId: number,
   pageId: number,
-  model: string
+  model: string,
+  temporalOptions?: {
+    enabled: boolean;
+    events: any[];
+  }
 ): Promise<any[]> {
   const page = await pageRepository.getById(pageId);
   if (!page) {
@@ -93,7 +99,30 @@ export async function runSinglePageAnalysis(
 
   const candidateRec = await candidateRepository.getByPage(pageId);
   const candidateList = candidateRec ? safeJsonParse(candidateRec.candidate_list, []) : [];
-  const top30 = candidateList.slice(0, 30);
+
+  // بررسی بونوس‌های زمانی و فصلی برای هوشمندسازی خروجی
+  let processedCandidates = candidateList;
+  if (temporalOptions?.enabled && temporalOptions.events && temporalOptions.events.length > 0) {
+    const allPages = await pageRepository.listByProject(projectId);
+    const targetMetadata = new Map<number, { title: string; categoryValues: string[] }>();
+    allPages.forEach(p => {
+      const cats = safeJsonParse(p.categories, {});
+      const values = Object.values(cats).filter(v => typeof v === 'string') as string[];
+      targetMetadata.set(p.id!, {
+        title: p.title,
+        categoryValues: values
+      });
+    });
+
+    const boosted = applyTemporalBoost(candidateList, {
+      events: temporalOptions.events,
+      targetMetadata,
+      sourcePageTitle: page.title
+    });
+    processedCandidates = sortByBoostedScore(boosted);
+  }
+
+  const top30 = processedCandidates.slice(0, 30);
 
   // غنی‌سازی کاندیداها به صورت بلادرنگ از روی جدول با اطلاعات دسته‌بندی‌ها
   const enrichedCandidates = await Promise.all(

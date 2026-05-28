@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { db } from '../db';
 import { useProject } from '../hooks/useProject';
@@ -7,13 +7,17 @@ import { Button } from '../components/ui/Button';
 import { Spinner } from '../components/ui/Spinner';
 import Breadcrumb from '../components/Breadcrumb';
 import { useToast } from '../hooks/useToast';
-import { Settings, Sliders, Zap, LayoutDashboard } from 'lucide-react';
+import { Settings, Sliders, Zap, LayoutDashboard, Calendar, Upload, Download, Trash2 } from 'lucide-react';
+import { useTemporalContext } from '../contexts/TemporalContext';
+import { triggerDownloadTemplate, parseCsvFile } from '../services/temporal/temporalCsvService';
 
 export default function Config() {
   const { projectId } = useParams<{ projectId: string }>();
   const navigate = useNavigate();
   const { project, weights: dbWeights, loading } = useProject(projectId);
   const { showToast } = useToast();
+  const temporal = useTemporalContext();
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [scoringMode, setScoringMode] = useState<'linear' | 'weighted'>('linear');
   const [localWeights, setLocalWeights] = useState<Record<string, number>>({});
@@ -167,6 +171,155 @@ export default function Config() {
             </select>
           </section>
 
+          {/* هوشمندسازی فصلی-زمانی (Live Boost) */}
+          <section className="bg-white rounded-2xl shadow-xs border border-gray-100 p-6 space-y-4">
+            <div className="flex justify-between items-center pb-2 border-b border-gray-100">
+              <h2 className="text-sm font-bold flex items-center gap-2 text-gray-800">
+                <Calendar size={16} className="text-blue-500" />
+                <span>هوشمندسازی فصلی-زمانی (Live Boost)</span>
+              </h2>
+              {/* دکمه تغییر وضعیت (Toggle Button) سوییچ سراسری */}
+              <button 
+                type="button"
+                onClick={() => temporal.setGlobalEnabled(!temporal.globalEnabled)}
+                className={`relative w-11 h-6 rounded-full transition-colors duration-200 cursor-pointer focus:outline-hidden ${temporal.globalEnabled ? 'bg-blue-600' : 'bg-gray-200'}`}
+              >
+                <span className={`absolute top-0.5 ${temporal.globalEnabled ? 'right-0.5' : 'right-5'} w-5 h-5 bg-white rounded-full shadow transition-all duration-200`} />
+              </button>
+            </div>
+
+            <p className="text-xs text-gray-500 leading-relaxed">
+              با فعال‌سازی این گزینه، صفحاتی که با مناسبت‌های مناسب فصلی/جاری/آینده منطبق یا همراستا هستند، امتیاز اولویت (Boost) دریافت خواهند کرد و در صدر قرار می‌گیرند.
+            </p>
+
+            <div className="bg-blue-50/30 rounded-xl p-3 text-xs text-blue-800 border border-blue-100/30 space-y-1">
+              <div className="font-semibold flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 bg-blue-600 rounded-full"></span>
+                <span>مناسبت‌های سیستمی پیش‌فرض: ۶ مورد</span>
+              </div>
+              <p className="text-gray-500 text-[10px] leading-relaxed pr-3">
+                شامل فصل‌های چهارگانه شمسی (بهار، تابستان، پاییز، زمستان)، جشنواره خرید نوروزی و شب یلدا به‌طور داخلی پیاده‌سازی شده و معتبر هستند.
+              </p>
+            </div>
+
+            {/* دانلود تمپلیت و آپلود فایل CSV مناسبت‌ها */}
+            <div className="grid grid-cols-2 gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={triggerDownloadTemplate}
+                className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-lg bg-gray-50 hover:bg-gray-100 border border-gray-200/60 text-gray-700 text-xs font-bold transition-all cursor-pointer focus:outline-hidden"
+              >
+                <Download size={14} className="text-gray-500" />
+                <span>دانلود تمپلیت</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-lg bg-blue-50 hover:bg-blue-100/80 border border-blue-200/60 text-blue-700 text-xs font-bold transition-all cursor-pointer focus:outline-hidden"
+              >
+                <Upload size={14} />
+                <span>آپلود فایل CSV</span>
+              </button>
+              
+              <input 
+                type="file" 
+                ref={fileInputRef} 
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  try {
+                    const { events, errors } = await parseCsvFile(file);
+                    if (errors.length > 0) {
+                      showToast({ 
+                        type: 'error', 
+                        message: `خطا در ${errors.length} ردیف اطلاعات. لطفاً فرمت فایل را با تمپلیت دانلود شده بازبینی کنید.` 
+                      });
+                    }
+                    if (events.length > 0) {
+                      temporal.setCsvEvents(events);
+                      showToast({ 
+                        type: 'success', 
+                        message: `${events.length} مناسبت اختصاصی فصلی-زمانی با موفقیت بارگذاری شد.` 
+                      });
+                    }
+                  } catch (err) {
+                    console.error(err);
+                    showToast({ type: 'error', message: 'خطا در خواندن و پارس فایل CSV.' });
+                  } finally {
+                    e.target.value = ''; // ریست مقدار جهت امکان آپلود مجدد فایل یکسان
+                  }
+                }} 
+                accept=".csv" 
+                className="hidden" 
+              />
+            </div>
+
+            {/* جدول پیش‌نمایش رویدادها */}
+            {temporal.csvEvents.length > 0 && (
+              <div className="space-y-2 pt-2 animate-in fade-in duration-300">
+                <div className="flex justify-between items-center text-xs">
+                  <span className="font-bold text-gray-700">مناسبت‌های بارگذاری شده ({temporal.csvEvents.length})</span>
+                  <button
+                    onClick={() => {
+                      temporal.setCsvEvents([]);
+                      showToast({ type: 'success', message: 'تمام مناسبت‌های اختصاصی حذف شدند.' });
+                    }}
+                    className="flex items-center gap-1 text-[10px] text-rose-600 hover:text-rose-700 font-bold transition-all cursor-pointer focus:outline-hidden"
+                  >
+                    <Trash2 size={12} />
+                    <span>حذف همه</span>
+                  </button>
+                </div>
+
+                <div className="border border-gray-100 rounded-xl overflow-hidden max-h-48 overflow-y-auto">
+                  <table className="w-full text-right text-[10px] border-collapse">
+                    <thead className="bg-gray-50 text-gray-600 border-b border-gray-100 sticky top-0">
+                      <tr>
+                        <th className="p-2 font-bold">عنوان وبازه زمان</th>
+                        <th className="p-2 font-bold">کلمات کلیدی</th>
+                        <th className="p-2 text-center font-bold w-10">حذف</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-50 bg-white">
+                      {temporal.csvEvents.map((ev) => (
+                        <tr key={ev.id} className="hover:bg-gray-50/50 transition-all">
+                          <td className="p-2">
+                            <div className="font-bold text-gray-850 truncate max-w-[120px]" title={ev.name}>{ev.name}</div>
+                            <div className="text-[9px] text-gray-400 mt-0.5">
+                              {`${ev.startDate.year}/${String(ev.startDate.month).padStart(2, '0')}/${String(ev.startDate.day).padStart(2, '0')} الی ${ev.endDate.year}/${String(ev.endDate.month).padStart(2, '0')}/${String(ev.endDate.day).padStart(2, '0')}`}
+                            </div>
+                          </td>
+                          <td className="p-2 text-gray-500 max-w-[110px]">
+                            <div className="flex flex-wrap gap-0.5 max-h-12 overflow-hidden" title={ev.keywords.join('، ')}>
+                              {ev.keywords.map((kw, idx) => (
+                                <span key={idx} className="inline-block bg-gray-100 text-gray-600 px-1 py-0.5 rounded text-[9px]">
+                                  {kw}
+                                </span>
+                              ))}
+                            </div>
+                          </td>
+                          <td className="p-2 text-center">
+                            <button
+                              onClick={() => {
+                                temporal.setCsvEvents(temporal.csvEvents.filter(x => x.id !== ev.id));
+                                showToast({ type: 'success', message: `مناسبت «${ev.name}» حذف شد.` });
+                              }}
+                              className="text-gray-400 hover:text-rose-600 p-1 rounded-sm transition-all cursor-pointer"
+                              title="حذف این مورد"
+                            >
+                              <Trash2 size={10} />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </section>
+
           <Button 
             className="w-full py-3.5 rounded-xl shadow-xs bg-emerald-600 hover:bg-emerald-700 font-bold text-sm cursor-pointer" 
             onClick={handleStartAnalysis}
@@ -176,6 +329,7 @@ export default function Config() {
             <span>ذخیره و ورود به میز کار پروژه</span>
           </Button>
         </div>
+
       </div>
     </div>
   );

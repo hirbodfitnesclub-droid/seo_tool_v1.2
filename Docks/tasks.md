@@ -222,7 +222,7 @@
 ### هدف
 وقتی کاربر در میان پردازش تب را می‌بندد و دوباره باز می‌کند، صف‌هایی که status='processing' دارند ولی updated_at آن‌ها قدیمی است باید به وضعیت 'paused' تبدیل شوند تا کاربر بتواند آگاهانه resume کند.
 
-### راهنمای پیاده‌سازی فن����
+### راهنمای پیاده‌سازی فن������
 ۱. `src/repositories/queueRepository.ts` (از تسک R1) — متد `findInterrupted()` را پیاده کن:
    - تمام رکوردهای `status === 'processing'` که `updated_at` آن‌ها بیش از ۳۰ ثانیه از زمان فعلی فاصله دارد را بازگرداند.
 
@@ -316,7 +316,7 @@
 
 ## تسک R10 — پاک‌سازی نهایی، حذف شیم‌ها و فایل‌های تکراری
 
-### هدف
+### ��دف
 بعد از پایداری تسک‌های R1..R9، شیم‌های موقتی و کپی‌های تکراری حذف می‌شوند.
 
 ### راهنمای پیاده‌سازی فنی
@@ -442,7 +442,7 @@ R2, R3, R4 می‌توانند مستقل اجرا شوند ولی همگی به
 
 ۱. **حق نداری هیچ کدی رو حدس بزنی؛ همین الان با ابزار caling_tool فایل های کانتکست رو به صورت زنده فراخوانی کن و بخون و سپس کد این تسک رو بزن.**
 
-۲. **خط قرمز مطلق:** `src/db.ts` لمس نمی‌شود. هیچ جدول/ایندکس/migration جدید. اسکیمای Dexie v3 ثابت است.
+۲. **خط قرمز مطلق:** `src/db.ts` لمس نمی‌شود. هیچ جدول/ایندکس/migration ج��ید. اسکیمای Dexie v3 ثابت است.
 
 ۳. **خط قرمز مطلق:** `src/core/scoring/scorer.ts` و `src/core/scoring/idfCalculator.ts` لمس نمی‌شوند.
 
@@ -704,3 +704,485 @@ F1.1 (Reverse Index Service)
 4. کلیک روی مودال در میانه build → Spinner داخل مودال، سپس لیست.
 5. منطق Hybrid: صفحاتی که در `results` هستند فقط از آنجا خوانده می‌شوند، بقیه از `candidates`.
 6. `tsc --noEmit` بدون خطا.
+
+---
+
+# فاز ۲ — فیچر F2: Live / Temporal Boost
+
+## قوانین مشترک تمام تسک‌های F2
+
+۱. **حق نداری هیچ کدی رو حدس بزنی؛ همین الان با ابزار calling_tool فایل های کانتکست رو به صورت زنده فراخوانی کن و بخون و سپس کد این تسک رو بزن.**
+
+۲. **خط قرمز مطلق:** `src/db.ts`، `src/core/scoring/scorer.ts`، `src/core/scoring/idfCalculator.ts` — هیچ تغییر.
+
+۳. **خط قرمز مطلق:** هیچ امتیازی که در Dexie ذخیره شده (`candidates.candidate_list`) بازنویسی نشود. F2 فقط لایه نمایش/قبل-از-Gemini است.
+
+۴. **هیچ کتابخانه جدیدی نصب نمی‌شود.** تاریخ شمسی فقط با `Intl.DateTimeFormat('fa-IR')`. ممنوع: `moment-jalaali`, `jalali-moment`, `dayjs-jalali`, `date-fns-jalali`, `jalaali-js`.
+
+۵. **State با Context API** — نه Zustand، نه Redux. (تطبیق با Anti-Patterns پروژه که توسط معمار تثبیت شده.)
+
+۶. **Persistence فقط localStorage** با کلیدهای `LINKMESH_TEMPORAL_*`. هیچ جدول Dexie جدید.
+
+۷. کامنت‌ها فارسی. متن UI فارسی. RTL.
+
+۸. لایه‌بندی: UI → Context/Hooks → Services (Pure) → Constants. کامپوننت `import { db }` ندارد.
+
+---
+
+## تسک F2.1 — زیرساخت تقویم شمسی + ثابت‌های Built-in
+
+### هدف
+ساخت دو فایل پایه: یک wrapper Pure روی `Intl.DateTimeFormat('fa-IR')` برای کار با تاریخ شمسی، و یک constant با تعریف فصل‌ها/مناسبت‌های ثابت. این تسک هیچ UI و state ندارد؛ فقط زیرساخت.
+
+### راهنمای پیاده‌سازی فنی
+
+۱. **ساخت فایل جدید `src/services/temporal/jalaliCalendar.ts`:**
+   - تایپ صادر شده:
+     ```ts
+     export interface JalaliDate { year: number; month: number; day: number; }
+     ```
+   - تابع `getCurrentJalaliDate(): JalaliDate`:
+     - با `new Intl.DateTimeFormat('fa-IR-u-nu-latn', { year: 'numeric', month: 'numeric', day: 'numeric' }).formatToParts(new Date())` پارت‌ها را بگیر.
+     - **توجه:** `nu-latn` (numeric: latin) باعث می‌شود اعداد به‌صورت انگلیسی (`1404`) برگردد نه فارسی (`۱۴۰۴`). این برای parseInt حیاتی است.
+     - از پارت‌های `year`, `month`, `day` آبجکت بساز.
+   - تابع `parseJalaliDate(input: string): JalaliDate | null`:
+     - ابتدا اعداد فارسی/عربی را به انگلیسی normalize کن (یک تابع داخلی `toLatinDigits`):
+       - `۰..۹` → `0..9` (charCode 0x06F0..0x06F9)
+       - `٠..٩` → `0..9` (charCode 0x0660..0x0669)
+     - سپس با regex `/^(\d{4})\/(\d{1,2})\/(\d{1,2})$/` پارس کن.
+     - اعتبار محدوده: `month ∈ [1,12]`, `day ∈ [1,31]`, `year ∈ [1300, 1500]`. در صورت تخطی، `null`.
+   - تابع `jalaliToOrdinal(d: JalaliDate): number`:
+     - یک عدد ترتیبی که برای مقایسه و محاسبه فاصله استفاده می‌شود.
+     - فرمول ساده و کافی برای دامنه ما (نه دقت اخترشناسی):
+       ```ts
+       // ۶ ماه اول هر کدام ۳۱ روز، ۵ ماه بعدی هر کدام ۳۰ روز، اسفند ۲۹ روز (تقریبی)
+       const monthLengths = [31,31,31,31,31,31,30,30,30,30,30,29];
+       let dayOfYear = 0;
+       for (let m = 1; m < d.month; m++) dayOfYear += monthLengths[m-1];
+       dayOfYear += d.day;
+       return d.year * 366 + dayOfYear;
+       ```
+     - این فقط برای محاسبه فاصله نسبی (روزها) استفاده می‌شود نه ذخیره‌سازی. کسری روزهای کبیسه برای محاسبه «۳۰ تا ۶۰ روز مانده» اهمیت قابل اغماض دارد (خطای حداکثر ۱-۲ روز).
+   - تابع `jalaliDaysBetween(a: JalaliDate, b: JalaliDate): number`:
+     - `return jalaliToOrdinal(b) - jalaliToOrdinal(a);` — مثبت یعنی b بعد از a.
+   - تابع `isJalaliInRange(d: JalaliDate, start: JalaliDate, end: JalaliDate): boolean`:
+     - با ordinal مقایسه کن: `dOrd >= startOrd && dOrd <= endOrd`.
+     - **پشتیبانی از بازه عبوری از سال (مانند نوروز ۲۸ اسفند → ۱۳ فروردین):**
+       اگر `endOrd < startOrd`، یعنی بازه عبوری است. در این حالت:
+       `return dOrd >= startOrd || dOrd <= endOrd;`
+       (نکته: ordinal سال متفاوت است؛ این منطق فقط با مقایسه month/day بدون year کار می‌کند → یک تابع کمکی `jalaliMonthDayOrdinal(d)` بساز که فقط `(d.month-1)*31 + d.day` می‌دهد و برای مقایسه intra-year استفاده شود.)
+   - هیچ import خارجی به جز توابع داخلی. هیچ ارجاع به React/db.
+
+۲. **ساخت فایل جدید `src/constants/temporalSeasons.ts`:**
+   - import نوع `JalaliDate` و `TemporalEvent` (که در تسک F2.2 ساخته می‌شود — موقتاً تایپ‌های inline استفاده کن یا تایپ را در همین فایل تعریف کن و در F2.2 از اینجا re-export شود).
+   - **روش پیشنهادی:** تایپ `TemporalEvent` را در همین تسک به‌صورت یک‌بار در `src/services/temporal/temporalService.ts` (فایل بعدی این تسک، بدون پر کردن منطق) تعریف کن، و در constants فقط import کن.
+   - یک آرایه `BUILT_IN_TEMPORAL_EVENTS: TemporalEvent[]` با ۶ event (بهار، تابستان، پاییز، زمستان، نوروز، یلدا) دقیقاً طبق جدول بخش ۱۰ ARCHITECTURE.md.
+   - `id` هر event: `'builtin-spring'`, `'builtin-summer'`, ...
+   - `source: 'builtin'`.
+   - keywords lowercase + trim.
+
+۳. **ساخت stub فایل `src/services/temporal/temporalService.ts`:**
+   - فقط تعریف تایپ‌های `TemporalLabel`, `TemporalEvent`, `BoostedCandidate` (طبق بخش ۱۰ ARCHITECTURE.md).
+   - تابع `applyTemporalBoost` در تسک F2.2 پیاده می‌شود؛ فعلاً یک stub که فقط آرایه ورودی را بدون تغییر برمی‌گرداند با `temporalMultiplier=1`. کامنت `// TODO: F2.2` بگذار.
+
+### محدودیت‌ها
+- ✅ تابع‌ها Pure باشند (بدون side-effect).
+- ✅ هیچ import از React/Dexie.
+- ⛔ بدون moment-jalaali یا هر کتابخانه تاریخ.
+- ⛔ بدون `new Date(jalaliString)` (که گرگوری پارس می‌کند).
+
+### معیار پذیرش
+- `tsc --noEmit` بدون خطا.
+- در DevTools: `getCurrentJalaliDate()` آبجکت معتبر شمسی برگرداند (مثلاً `{year: 1404, month: 3, day: 7}` برای ۲۸ خرداد ۱۴۰۴).
+- `parseJalaliDate('۱۴۰۴/۰۹/۳۰')` و `parseJalaliDate('1404/9/30')` هر دو باید `{year:1404, month:9, day:30}` بدهند.
+
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "Docks/PROJECT.md", "src/constants/categories.ts"]`
+
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان فایل‌های کانتکست را بخوان و سپس کد این تسک را بنویس.
+
+---
+
+## تسک F2.2 — هسته سرویس Temporal Boost (Pure Logic)
+
+### هدف
+پیاده‌سازی تابع اصلی `applyTemporalBoost` که آرایه‌ای از کاندیداها را می‌گیرد و نسخه boosted آن را برمی‌گرداند. این تابع قلب فیچر است — Pure، بدون side-effect، بدون وابستگی DOM/Dexie/React.
+
+### راهنمای پیاده‌سازی فنی
+
+۱. **در `src/services/temporal/temporalService.ts` — پیاده‌سازی کامل:**
+   - تایپ‌ها از تسک F2.1 موجود است.
+   - تابع کمکی داخلی `extractKeywordsFromCandidate(candidate, targetMetadata?): string[]`:
+     - ترکیب از: `candidate.title.toLowerCase()` + `candidate.matched_tags` (lower-cased) + اگر `targetMetadata.get(candidate.page_id)` موجود بود، `categoryValues` آن.
+     - خروجی: یک آرایه string lowercase + trim + dedupe.
+   - تابع کمکی داخلی `matchEventToKeywords(event, keywords): boolean`:
+     - برای هر `kw of event.keywords`: اگر `keywords.some(k => k.includes(kw) || kw.includes(k))` → match.
+     - **توجه به نیم‌فاصله/فاصله:** قبل از مقایسه، هر دو طرف را با replace `/\s+/g => ' '` و `replace(/\u200c/g, ' ')` (نیم‌فاصله → فاصله) normalize کن.
+   - تابع کمکی داخلی `classifyEventTiming(event, today): { label: TemporalLabel | null; multiplier: number; reason: string } | null`:
+     - اگر `isJalaliInRange(today, event.startDate, event.endDate)` → `{label:'current', multiplier:3, reason:`در حال برگزاری: ${event.name}`}`.
+     - وگرنه `daysToStart = jalaliDaysBetween(today, event.startDate)`. اگر `daysToStart >= 30 && daysToStart <= 60` → `{label:'pre', multiplier:4, reason:`پیش‌واز ${event.name} — ${daysToStart} روز مانده`}`.
+     - **حالت خاص بازه‌های سال‌گردنده (مثل نوروز/یلدا):** اگر event سالانه است (مثلاً سال در `startDate` کوچک‌تر یا برابر امسال است)، یک «نمونه امسال» از event بساز با تطبیق `year = today.year` (یا `today.year + 1` اگر تاریخ امسال گذشته است). سپس همان منطق بالا را اعمال کن.
+       - این منطق در یک تابع کمکی `projectEventToCurrentYear(event, today): TemporalEvent` انجام شود.
+     - در غیر این صورت `null` (event بر این کاندیدا اثر ندارد).
+   - تابع کمکی داخلی `detectOutOfSeason(keywords, today, builtInEvents): string | null`:
+     - اگر یکی از keywords حاوی نام یک فصل ('بهار', 'تابستان', 'پاییز', 'زمستان') است **و** آن فصل الان در جریان نیست → برگشت نام فصل به‌عنوان دلیل penalty.
+     - وگرنه `null`.
+   - **تابع اصلی `applyTemporalBoost(candidates, options)`:**
+     ```
+     today = options.today ?? getCurrentJalaliDate()
+     events = options.events
+     
+     return candidates.map(c => {
+       keywords = extractKeywordsFromCandidate(c, options.targetMetadata)
+       
+       bestMatch = null
+       for (event of events):
+         if (!matchEventToKeywords(event, keywords)) continue
+         projected = projectEventToCurrentYear(event, today)
+         classification = classifyEventTiming(projected, today)
+         if (!classification) continue
+         if (!bestMatch || classification.multiplier > bestMatch.multiplier):
+           bestMatch = { ...classification, eventName: event.name }
+       
+       if (bestMatch):
+         return { ...c, boostedScore: c.score * bestMatch.multiplier, 
+                  temporalMultiplier: bestMatch.multiplier, 
+                  temporalLabel: bestMatch.label, 
+                  temporalReason: bestMatch.reason, 
+                  matchedEventName: bestMatch.eventName }
+       
+       outOfSeasonReason = detectOutOfSeason(keywords, today, events.filter(e=>e.source==='builtin'))
+       if (outOfSeasonReason):
+         return { ...c, boostedScore: c.score * 0.15, 
+                  temporalMultiplier: 0.15, 
+                  temporalLabel: 'out-of-season', 
+                  temporalReason: `خارج از فصل: ${outOfSeasonReason}`, 
+                  matchedEventName: null }
+       
+       return { ...c, boostedScore: c.score, temporalMultiplier: 1, 
+                temporalLabel: 'neutral', temporalReason: '', matchedEventName: null }
+     })
+     ```
+   - تابع helper اضافی صادر شده برای تست/UI:
+     ```ts
+     export function sortByBoostedScore(boosted: BoostedCandidate[]): BoostedCandidate[]
+     ```
+     که آرایه را immutable مرتب می‌کند (clone + sort نزولی بر `boostedScore`).
+
+۲. **هیچ تغییر در UI/Context/Repositories در این تسک.** فقط service.
+
+### محدودیت‌ها
+- ✅ تابع Pure — بدون side-effect، بدون mutation ورودی.
+- ✅ پوشش حالت‌ها: pre, current, out-of-season, neutral.
+- ✅ پشتیبانی نیم‌فاصله در keyword matching.
+- ⛔ بدون فراخوانی `Date.now()` داخل تابع (فقط از `options.today` یا یک‌بار `getCurrentJalaliDate()`).
+- ⛔ بدون console.log در نسخه نهایی.
+
+### معیار پذیرش
+- `tsc --noEmit` بدون خطا.
+- یک کاندیدا با عنوان «تور پیست اسکی توچال» در دی‌ماه → `temporalLabel: 'current'`, `multiplier: 3`.
+- همان کاندیدا در تیر‌ماه → `temporalLabel: 'out-of-season'`, `multiplier: 0.15`.
+- کاندیدا با عنوان «تور یلدا» در ۱۵ آبان → `temporalLabel: 'pre'`, `multiplier: 4` (۴۵ روز تا ۳۰ آذر).
+
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/services/temporal/jalaliCalendar.ts", "src/constants/temporalSeasons.ts"]`
+
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ فایل‌های کانتکست را بخوان و کد را بنویس.
+
+---
+
+## تسک F2.3 — سرویس CSV (Generate / Parse) با Zod
+
+### هدف
+ساخت سرویسی که یک تمپلیت CSV قابل دانلود تولید می‌کند و فایل‌های آپلودی کاربر را با Zod اعتبارسنجی و به آرایه `TemporalEvent` تبدیل می‌کند.
+
+### راهنمای پیاده‌سازی فنی
+
+۱. **ساخت فایل جدید `src/services/temporal/temporalCsvService.ts`:**
+   - import: `Papa` از `papaparse`, `z` از `zod`, `parseJalaliDate` از `./jalaliCalendar`, تایپ‌ها از `./temporalService`.
+   - تابع `generateCsvTemplate(): string`:
+     - رشته CSV با هدر فارسی + ۲ ردیف نمونه:
+       ```
+       نام_مناسبت,تاریخ_شروع_شمسی,تاریخ_پایان_شمسی,کلمات_کلیدی
+       شب یلدا,1404/09/30,1404/09/30,یلدا|شب چله|انار
+       نوروز,1404/12/29,1405/01/13,نوروز|عید|تعطیلات بهاری
+       ```
+     - اضافه کردن BOM `\uFEFF` در ابتدای رشته برای پشتیبانی Excel فارسی (الگوی موجود در `csvExporter.ts` فعلی پروژه را بررسی کن).
+   - تابع کمکی `triggerDownloadTemplate(): void`:
+     - یک Blob با `text/csv;charset=utf-8` بساز و با URL.createObjectURL + `<a download>` دانلود را trigger کن. نام فایل: `linkmesh-temporal-template.csv`.
+   - تابع `parseCsvFile(file: File): Promise<{ events: TemporalEvent[]; errors: string[] }>`:
+     - با `Papa.parse` و `header: true` parse کن.
+     - schema Zod:
+       ```ts
+       const RowSchema = z.object({
+         'نام_مناسبت': z.string().min(1),
+         'تاریخ_شروع_شمسی': z.string().min(1),
+         'تاریخ_پایان_شمسی': z.string().min(1),
+         'کلمات_کلیدی': z.string().min(1)
+       });
+       ```
+     - برای هر ردیف:
+       - `safeParse` کن. اگر invalid → `errors.push(`ردیف ${i+1}: ستون اجباری خالی است`)` و skip.
+       - `parseJalaliDate(startStr)` و `parseJalaliDate(endStr)`. اگر `null` → `errors.push(`ردیف ${i+1}: فرمت تاریخ نامعتبر`)` و skip.
+       - keywords را با `.split('|').map(k => k.trim().toLowerCase()).filter(Boolean)` پردازش کن.
+       - اگر keywords خالی → خطا و skip.
+       - `id = `csv-${Date.now()}-${i}``, `source: 'csv'`.
+       - به آرایه events اضافه کن.
+     - return `{ events, errors }`.
+
+۲. **هیچ تغییر در UI در این تسک.** فقط service.
+
+### محدودیت‌ها
+- ✅ ردیف نامعتبر → skip + پیام خطا، نه crash.
+- ✅ پشتیبانی اعداد فارسی در تاریخ.
+- ✅ BOM برای Excel.
+- ⛔ بدون نصب کتابخانه جدید (Papa Parse و Zod هر دو موجود).
+- ⛔ بدون ذخیره مستقیم در localStorage از داخل service (Context آن را هندل می‌کند).
+
+### معیار پذیرش
+- `tsc --noEmit` بدون خطا.
+- یک CSV با ۳ ردیف صحیح → `events.length === 3, errors.length === 0`.
+- یک CSV با ۲ ردیف صحیح + ۱ ردیف با تاریخ خراب → `events.length === 2, errors.length === 1`.
+- `generateCsvTemplate()` خروجی با BOM و ۳ خط (۱ هدر + ۲ نمونه).
+
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/services/temporal/jalaliCalendar.ts", "src/services/temporal/temporalService.ts", "src/services/io/csvExporter.ts", "src/services/io/csvParser.ts", "package.json"]`
+
+> **یادآوری:** فایل‌های کانتکست را بخوان و کد را بنویس.
+
+---
+
+## تسک F2.4 — TemporalContext + Persistence (localStorage)
+
+### هدف
+ساخت Context Provider که state فیچر F2 را مدیریت می‌کند: سوییچ سراسری، override موضعی صفحه، و آرایه eventهای CSV. تمام تغییرات در localStorage persist شوند.
+
+### راهنمای پیاده‌سازی فنی
+
+۱. **ساخت فایل جدید `src/contexts/TemporalContext.tsx`:**
+   - تایپ `TemporalContextValue` (طبق بخش ۱۰ ARCHITECTURE.md).
+   - کلیدهای localStorage به‌صورت ثابت در بالای فایل:
+     ```ts
+     const KEY_GLOBAL = 'LINKMESH_TEMPORAL_GLOBAL_ENABLED';
+     const KEY_PER_PAGE = 'LINKMESH_TEMPORAL_PER_PAGE';
+     const KEY_CSV = 'LINKMESH_TEMPORAL_CSV_EVENTS';
+     ```
+   - تابع‌های کمکی `loadFromStorage` (سه تا، یکی برای هر کلید):
+     - با `try/catch` در صورت parse error → return default.
+     - default values: `globalEnabled = false`, `perPageEnabled = {}`, `csvEvents = []`.
+   - کامپوننت `TemporalProvider({ children })`:
+     - state اولیه با `useState(() => loadFromStorage(...))` (lazy init).
+     - `useEffect` برای هر state → write به localStorage.
+     - متدها:
+       ```ts
+       setGlobalEnabled(v) → setState + localStorage.setItem
+       setPageEnabled(pageId, v) → state.perPageEnabled[pageId] = v + سinco
+       setCsvEvents(events) → setState + localStorage
+       isEnabledForPage(pageId) → 
+         اگر perPageEnabled[pageId] !== undefined: return perPageEnabled[pageId]
+         وگرنه: return globalEnabled
+       getAllActiveEvents() → [...BUILT_IN_TEMPORAL_EVENTS, ...csvEvents]
+       ```
+     - **مهم:** `getAllActiveEvents` و سایر computed values را با `useMemo` cache کن تا re-render اضافی نداشته باشد.
+     - return `<TemporalContext.Provider value={...}>{children}</...>`.
+   - hook `useTemporalContext(): TemporalContextValue`:
+     - با `useContext(TemporalContext)`. اگر undefined → throw `'useTemporalContext باید داخل TemporalProvider استفاده شود'`.
+
+۲. **ویرایش `src/main.tsx` (یا `src/App.tsx` — هرکدام محل root است):**
+   - `<TemporalProvider>` را در سطح بالای درخت کامپوننت‌ها (داخل `<ToastContext>` یا بیرون آن — معمولاً نزدیک ریشه) wrap کن.
+   - **توجه:** فقط یک Provider اضافه می‌شود؛ ساختار route و سایر providerها دست‌نخورده.
+
+۳. **هیچ تغییر در UI کاربر در این تسک.** Provider فعال است ولی هیچ کامپوننتی هنوز از آن استفاده نمی‌کند.
+
+### محدودیت‌ها
+- ✅ lazy init برای جلوگیری از read مکرر localStorage.
+- ✅ try/catch در parse JSON.
+- ✅ useMemo برای computed values.
+- ⛔ بدون useReducer (overkill برای این case).
+- ⛔ بدون Zustand.
+
+### معیار پذیرش
+- `tsc --noEmit` بدون خطا.
+- در DevTools React: TemporalProvider در درخت دیده می‌شود.
+- تغییر مقدار از داخل یک کامپوننت تستی → مقدار در `localStorage` مرورگر persist می‌شود → reload → مقدار حفظ می‌شود.
+
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/main.tsx", "src/App.tsx", "src/contexts/ToastContext.tsx", "src/services/temporal/temporalService.ts", "src/constants/temporalSeasons.ts"]`
+
+> **یادآوری:** فایل‌های کانتکست را بخوان و کد را بنویس.
+
+---
+
+## تسک F2.5 — UI: بخش تنظیمات Live در Config.tsx
+
+### هدف
+افزودن یک سکشن جدید به صفحه `Config.tsx` با: سوییچ سراسری «لینک‌سازی Live»، دکمه دانلود تمپلیت، آپلود CSV، و جدول preview eventهای فعال.
+
+### راهنمای پیاده‌سازی فنی
+
+۱. **ویرایش `src/pages/Config.tsx`:**
+   - import:
+     ```ts
+     import { useTemporalContext } from '../contexts/TemporalContext';
+     import { generateCsvTemplate, parseCsvFile } from '../services/temporal/temporalCsvService';
+     import { Calendar, Upload, Download } from 'lucide-react';
+     ```
+   - داخل کامپوننت:
+     ```ts
+     const temporal = useTemporalContext();
+     const fileInputRef = useRef<HTMLInputElement>(null);
+     ```
+   - یک سکشن جدید (بعد از سکشن «محدودیت تعداد لینک» در ستون چپ، یا یک `<section>` در سطح اول grid) با ساختار:
+     - عنوان: «هوشمندسازی فصلی-زمانی (Live Boost)» با آیکون `Calendar`.
+     - یک Toggle (می‌توانی با یک `<button>` ساده + استایل Tailwind بسازی، الگوی توگل ساده با `bg-blue-600` و دایره متحرک):
+       ```tsx
+       <button onClick={() => temporal.setGlobalEnabled(!temporal.globalEnabled)}
+               className={`relative w-11 h-6 rounded-full transition-colors ${temporal.globalEnabled ? 'bg-blue-600' : 'bg-gray-200'}`}>
+         <span className={`absolute top-0.5 ${temporal.globalEnabled ? 'right-0.5' : 'right-5'} w-5 h-5 bg-white rounded-full shadow transition-all`} />
+       </button>
+       ```
+     - متن توضیحی فارسی: «با فعال‌سازی این گزینه، صفحاتی که با مناسبت‌های جاری/آینده مرتبط هستند اولویت بالاتر می‌گیرند.»
+     - دکمه «دانلود تمپلیت CSV» → فراخوانی helper `triggerDownloadTemplate` یا inline blob download از `generateCsvTemplate()`.
+     - input file مخفی + دکمه «آپلود فایل مناسبت‌ها» که `fileInputRef.current?.click()` می‌زند.
+     - در `onChange` فایل:
+       ```ts
+       const file = e.target.files?.[0]; if (!file) return;
+       const { events, errors } = await parseCsvFile(file);
+       if (errors.length > 0) {
+         showToast({ type: 'error', message: `خطا در ${errors.length} ردیف. تمپلیت را دانلود و بازبینی کنید.` });
+       }
+       if (events.length > 0) {
+         temporal.setCsvEvents(events);
+         showToast({ type: 'success', message: `${events.length} مناسبت با موفقیت بارگذاری شد.` });
+       }
+       e.target.value = ''; // ریست برای آپلود مجدد فایل یکسان
+       ```
+     - جدول preview: لیست `temporal.csvEvents` (اگر طولش > 0) با ستون‌های نام، بازه شمسی، تعداد keywords. در بالا یک خط ثابت: «مناسبت‌های built-in: ۶ مورد (فصل‌ها + نوروز + یلدا)».
+     - دکمه «حذف همه مناسبت‌های CSV» → `temporal.setCsvEvents([])`.
+
+۲. **هیچ تغییر در منطق امتیازدهی Config یا save.** این سکشن مستقل است.
+
+### محدودیت‌ها
+- ✅ تمام متن فارسی، RTL.
+- ✅ Toast هم برای موفقیت هم خطا.
+- ✅ پاک کردن `e.target.value` برای امکان آپلود مجدد فایل یکسان.
+- ⛔ بدون Drag-and-Drop آپلود (out of scope).
+- ⛔ بدون preview محتوای CSV قبل از parse.
+
+### معیار پذیرش
+- `tsc --noEmit` بدون خطا.
+- صفحه Config جدید — سکشن Live boost قابل مشاهده.
+- آپلود یک CSV معتبر → toast سبز + لیست در جدول.
+- آپلود CSV نامعتبر → toast قرمز + پیشنهاد دانلود تمپلیت.
+- reload صفحه → CSV events حفظ می‌شوند.
+
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/pages/Config.tsx", "src/contexts/TemporalContext.tsx", "src/services/temporal/temporalCsvService.ts", "src/components/ui/Button.tsx", "src/hooks/useToast.ts"]`
+
+> **یادآوری:** فایل‌های کانتکست را بخوان و کد را بنویس.
+
+---
+
+## تسک F2.6 — UI: Quick Toggle + اعمال Boost در PageDetail.tsx
+
+### هدف
+افزودن سوییچ سریع در هدر `PageDetail`، اعمال `applyTemporalBoost` روی `displayedCandidates` در صورت فعال بودن، و نمایش Badge کوچک روی هر CandidateCard که multiplier ≠ 1 دارد.
+
+### راهنمای پیاده‌سازی فنی
+
+۱. **ساخت کامپوننت جدید `src/components/TemporalBadge.tsx`:**
+   - props:
+     ```ts
+     { multiplier: number; label: 'pre' | 'current' | 'neutral' | 'out-of-season'; reason: string; }
+     ```
+   - رفتار:
+     - اگر `label === 'neutral'` → `return null` (هیچ نمایشی).
+     - اگر `pre` → Badge سبز با متن `+4x` و آیکون `TrendingUp`.
+     - اگر `current` → Badge آبی با متن `+3x` و آیکون `Calendar`.
+     - اگر `out-of-season` → Badge قرمز کم‌رنگ با متن `−penalty` و آیکون `TrendingDown`.
+     - `title={reason}` برای tooltip native.
+   - استایل با Tailwind، فقط فارسی.
+
+۲. **ویرایش `src/pages/PageDetail.tsx`:**
+   - import:
+     ```ts
+     import { useTemporalContext } from '../contexts/TemporalContext';
+     import { applyTemporalBoost, sortByBoostedScore, type BoostedCandidate } from '../services/temporal/temporalService';
+     import TemporalBadge from '../components/TemporalBadge';
+     ```
+   - داخل کامپوننت:
+     ```ts
+     const temporal = useTemporalContext();
+     const isTemporalActiveHere = temporal.isEnabledForPage(pgId);
+     ```
+   - **محاسبه boostedList با useMemo** (حیاتی برای پرفورمنس):
+     ```ts
+     const processedCandidates = useMemo(() => {
+       if (!isTemporalActiveHere) return candidateList;
+       const boosted = applyTemporalBoost(candidateList, {
+         events: temporal.getAllActiveEvents(),
+         targetMetadata: new Map() // در فاز اول از خود candidate.title و matched_tags استفاده می‌شود
+       });
+       return sortByBoostedScore(boosted);
+     }, [candidateList, isTemporalActiveHere, temporal.csvEvents, temporal.globalEnabled]);
+     
+     const displayedCandidates = showAllCandidates ? processedCandidates : processedCandidates.slice(0, 30);
+     ```
+   - **افزودن Quick Toggle در هدر** (همان ردیف Badgeها، کنار `<InlinkBadge>`):
+     ```tsx
+     <button onClick={() => temporal.setPageEnabled(pgId, !isTemporalActiveHere)}
+             className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-bold rounded-lg transition-all ${
+               isTemporalActiveHere ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-gray-50 text-gray-500 border border-gray-100'
+             }`}
+             title="فعال/غیرفعال‌سازی هوشمندسازی فصلی برای این صفحه">
+       <Calendar size={12} />
+       <span>{isTemporalActiveHere ? 'Live: روشن' : 'Live: خاموش'}</span>
+     </button>
+     ```
+   - **اعمال TemporalBadge داخل هر CandidateCard:**
+     - **توجه:** برای رعایت محدودیت «بدون تغییر در سایر کامپوننت‌ها» (در اصل این کامپوننت متعلق به فاز قبلی است)، **یک wrapper** در PageDetail ایجاد کن: کارت داخل یک `<div className="relative">` قرار گیرد و `<TemporalBadge ... />` به‌صورت `absolute top-2 left-2` روی کارت گذاشته شود (فقط برای موارد boosted). این روش بدون لمس `CandidateCard.tsx` نتیجه می‌دهد.
+     - شرط رندر badge: کاندیدا یک `BoostedCandidate` است (`'temporalLabel' in c`) و `c.temporalMultiplier !== 1`.
+
+۳. **اعمال boost در زمان ارسال به Gemini:**
+   - در `handleAIAnalysis` فعلی `analysisService.runSinglePageAnalysis` صدا زده می‌شود. **تغییر امضای آن service** را در این تسک انجام می‌دهیم؟ → خیر، چون قانون «حداقل تغییر». به جای آن:
+     - یک پارامتر اختیاری `temporalEvents?: TemporalEvent[]` به امضای `runSinglePageAnalysis` اضافه می‌شود (default = `undefined` → no-op، رفتار قبلی).
+     - وقتی `temporalEvents` پاس داده شد، در داخل service قبل از ارسال top30 به promptBuilder، با `applyTemporalBoost` و `sortByBoostedScore` آن‌ها را بازترتیب کن.
+     - در PageDetail اگر `isTemporalActiveHere` → `temporalEvents = temporal.getAllActiveEvents()` پاس بده. وگرنه `undefined`.
+
+### محدودیت‌ها
+- ✅ بدون لمس `CandidateCard.tsx` (الگوی wrapper).
+- ✅ useMemo برای پرفورمنس.
+- ✅ Quick Toggle آنی، بدون reload.
+- ⛔ بدون animation روی Toggle (out of scope).
+- ⛔ بدون تغییر در ساختار prompt Gemini.
+
+### معیار پذیرش
+- `tsc --noEmit` بدون خطا.
+- روشن کردن Quick Toggle → ترتیب کاندیداها فوراً تغییر می‌کند، Badgeهای Temporal دیده می‌شوند.
+- خاموش کردن Quick Toggle → بازگشت به مرتب‌سازی score خام.
+- زدن «تحلیل جادویی AI» در حالت فعال → AI بر اساس ترتیب جدید (boosted) پرامپت دریافت می‌کند.
+- در پروژه ۷۰۰ صفحه‌ای، روشن/خاموش کردن Toggle بدون hesitation محسوس.
+
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/pages/PageDetail.tsx", "src/contexts/TemporalContext.tsx", "src/services/temporal/temporalService.ts", "src/services/analysis/analysisService.ts", "src/components/CandidateCard.tsx"]`
+
+> **یادآوری:** فایل‌های کانتکست را بخوان و کد را بنویس.
+
+---
+
+## ترتیب اجرای فاز ۲-F2 (الزامی)
+
+```
+F2.1 (Calendar + Constants)
+  └→ F2.2 (Core Service)
+       └→ F2.3 (CSV Service)
+            └→ F2.4 (Context + Persistence)
+                 └→ F2.5 (Config UI)
+                      └→ F2.6 (PageDetail UI + Gemini wiring)
+```
+
+F2.2 و F2.3 می‌توانند موازی نباشند — F2.3 به تایپ‌های F2.2 وابسته است.
+
+## معیار پذیرش کل فیچر F2
+
+1. هیچ تغییری در `src/db.ts`, `src/core/scoring/scorer.ts`, `src/core/scoring/idfCalculator.ts` (diff خالی).
+2. هیچ کتابخانه جدید نصب نشده (دستورات `pnpm add` ممنوع در این فاز).
+3. در پروژه ۷۰۰ صفحه‌ای: توگل سراسری روشن → ترتیب صفحات لیست‌ها فوراً متغیر می‌شود (بدون freeze).
+4. آپلود CSV نامعتبر → خطای فارسی + پیشنهاد دانلود تمپلیت.
+5. تنظیمات بعد از reload صفحه از localStorage بازخوانی می‌شوند.
+6. تاریخ شمسی صحیح از `Intl.DateTimeFormat('fa-IR-u-nu-latn')` استخراج می‌شود (بدون moment-jalaali).
+7. `tsc --noEmit` بدون خطا.

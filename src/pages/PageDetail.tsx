@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { useLiveQuery } from 'dexie-react-hooks';
 import { useProject } from '../hooks/useProject';
@@ -17,12 +17,15 @@ import { motion, AnimatePresence } from 'motion/react';
 import { 
   ArrowRight, Brain, Info, Save, X, 
   ChevronUp, ChevronDown, ExternalLink,
-  CheckCircle, BarChart2, Globe, Tag, Sparkles
+  CheckCircle, BarChart2, Globe, Tag, Sparkles,
+  Calendar
 } from 'lucide-react';
 import { useInlinkAnalytics } from '../hooks/useInlinkAnalytics';
 import InlinkBadge from '../components/InlinkBadge';
 import InlinkModal from '../components/InlinkModal';
 import * as inlinkGraphService from '../services/analysis/inlinkGraphService';
+import { useTemporalContext } from '../contexts/TemporalContext';
+import { applyTemporalBoost, sortByBoostedScore } from '../services/temporal/temporalService';
 
 export default function PageDetail() {
   const { projectId, pageId } = useParams<{ projectId: string, pageId: string }>();
@@ -67,16 +70,59 @@ export default function PageDetail() {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [isUnsaved]);
 
+  const allPages = useLiveQuery(() => pageRepository.listByProject(pId), [pId]);
+  const { isEnabledForPage, getAllActiveEvents, setPageEnabled } = useTemporalContext();
+
   const candidateList = candidateRec ? safeJsonParse(candidateRec.candidate_list, []) : [];
   const categories = page ? safeJsonParse(page.categories, {}) : {};
 
+  // ساخت نگاشت متادیتا برای کلمات کلیدی دسته‌بندی مقصد
+  const targetMetadata = useMemo(() => {
+    const map = new Map<number, { title: string; categoryValues: string[] }>();
+    if (!allPages) return map;
+    allPages.forEach(p => {
+      const cats = safeJsonParse(p.categories, {});
+      const values = Object.values(cats).filter(v => typeof v === 'string') as string[];
+      map.set(p.id!, {
+        title: p.title,
+        categoryValues: values
+      });
+    });
+    return map;
+  }, [allPages]);
+
+  // آماده‌سازی کاندیداهای پردازش‌شده زمانی و اعمال بونوس فصلی
+  const processedCandidateList = useMemo(() => {
+    if (!candidateList || candidateList.length === 0) return [];
+    if (!isEnabledForPage(pgId)) return candidateList;
+
+    const activeEvents = getAllActiveEvents();
+    const boosted = applyTemporalBoost(candidateList, {
+      events: activeEvents,
+      targetMetadata,
+      sourcePageTitle: page?.title || ''
+    });
+    return sortByBoostedScore(boosted);
+  }, [candidateList, isEnabledForPage, pgId, getAllActiveEvents, targetMetadata, page?.title]);
+
   // نمایش ۳۰ کاندیدای برتر در حالت پیش‌فرض و نمایش بقیه با دکمه مشاهده بیشتر
-  const displayedCandidates = showAllCandidates ? candidateList : candidateList.slice(0, 30);
+  const displayedCandidates = showAllCandidates ? processedCandidateList : processedCandidateList.slice(0, 30);
 
   const handleAIAnalysis = async () => {
     setAnalyzing(true);
     try {
-      const newLinks = await analysisService.runSinglePageAnalysis(pId, pgId, 'gemini-3.1-flash-lite');
+      const isTemporalActive = isEnabledForPage(pgId);
+      const activeEvents = getAllActiveEvents();
+      
+      const newLinks = await analysisService.runSinglePageAnalysis(
+        pId, 
+        pgId, 
+        'gemini-3.1-flash-lite',
+        {
+          enabled: isTemporalActive,
+          events: activeEvents
+        }
+      );
       
       setSelectedLinks(newLinks);
       setIsUnsaved(true);
@@ -157,6 +203,18 @@ export default function PageDetail() {
             </Link>
             <Badge variant="blue" className="px-3 py-1 bg-blue-50 text-blue-700 border-blue-100">SEO Workstation</Badge>
             <InlinkBadge count={inlink.count} loading={inlink.loading} onClick={() => setInlinkModalOpen(true)} />
+            <button
+              onClick={() => setPageEnabled(pgId, !isEnabledForPage(pgId))}
+              className={`px-2.5 py-1 text-xs font-bold rounded-lg border transition-all flex items-center gap-1.5 cursor-pointer hover:scale-105 shrink-0 ${
+                isEnabledForPage(pgId)
+                  ? 'bg-emerald-50 text-emerald-700 border-emerald-100'
+                  : 'bg-gray-50 text-gray-400 border-gray-100 hover:text-gray-650'
+              }`}
+              title={isEnabledForPage(pgId) ? 'هوشمندسازی زمانی فعال است - برای غیرفعال‌سازی کلیک کنید' : 'هوشمندسازی زمانی غیرفعال است - برای فعال‌سازی کلیک کنید'}
+            >
+              <Calendar size={13} className={isEnabledForPage(pgId) ? 'text-emerald-500' : 'text-gray-400'} />
+              <span>هوشمندسازی زمانی: {isEnabledForPage(pgId) ? 'فعال' : 'غیرفعال'}</span>
+            </button>
             {isUnsaved && (
               <span className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-bold rounded-lg bg-yellow-50 text-yellow-700 border border-yellow-100 animate-pulse">
                 * تغییرات ذخیره نشده
