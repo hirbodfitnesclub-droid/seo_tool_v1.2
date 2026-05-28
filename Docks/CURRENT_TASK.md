@@ -4,29 +4,32 @@
 
 ---
 
-## فاز جاری: معماری تطبیقی پایپ‌لاین امتیازدهی (R13)
+## فاز جاری: **فاز ۲ — توسعه ویژگی‌ها (Feature Expansion)**
 
-پس از اجرای R12، پروژه‌های بزرگ سریع شدند ولی پروژه‌های کوچک/متوسط (مثلاً ۷۰۰ صفحه) به‌خاطر سربار راه‌اندازی Web Worker و IPC کند شدند. R13 یک شرط ساده اضافه می‌کند تا بر اساس تعداد صفحات یکی از دو مسیر (Fast-Track یا Heavy-Track) انتخاب شود. جزئیات معماری در بخش «Adaptive Scoring Pipeline» در `ARCHITECTURE.md` آمده.
+فاز ۱ و ۱.۵ تمام شدند. اکنون وارد فاز ۲ می‌شویم که اولین فیچر آن **Inlink Analytics (گراف معکوس لینک‌سازی)** است. چالش اصلی: پیدا کردن لینک‌های ورودی به یک صفحه بدون اسکیمای Dexie یا بدون UI Freeze. راه‌حل: **Reverse Index in-memory** با کش per-project + signature-based invalidation. جزئیات معماری در بخش ۹ `ARCHITECTURE.md` آمده.
 
 ---
 
-## تسک جاری: **R13 — Adaptive Scoring Pipeline (Fast-Track / Heavy-Track)**
+## تسک جاری: **F1.1 — زیرساخت Reverse Index Service**
 
-### وضعیت: **In Progress**
+### وضعیت: **Not Started**
 
 ### هدف
-حذف سربار Worker در پروژه‌های کوچک، با حفظ مزیت Worker در پروژه‌های بزرگ. مسیر اجرا بر اساس `pages.length` انتخاب می‌شود.
+ساخت سرویس `inlinkGraphService` که یک Reverse Index in-memory از گراف لینک‌سازی پروژه می‌سازد و آن را با کش module-level + signature-based invalidation مدیریت می‌کند. این تسک هیچ UI تولید نمی‌کند؛ فقط زیرساخت داده است.
 
-### قانون انتخاب مسیر (سخت‌گیرانه)
+### قانون کلیدی (سخت‌گیرانه)
 ```
-const SCORING_WORKER_THRESHOLD = 1000;
+برای هر source_page_id در پروژه:
+  if (resultRepository.getByPage(sourceId) exists):
+    منبع = result.recommended_links  → origin='result'
+  else:
+    منبع = candidate.candidate_list   → origin='candidate'
+  
+  for each link.page_id in منبع:
+    inlinkIndex.get(link.page_id).push({ sourcePageId, rank, score, ... })
+```
 
-if (pages.length <= SCORING_WORKER_THRESHOLD) {
-  // Fast-Track — Main Thread, no worker
-} else {
-  // Heavy-Track — Web Worker via computeAllInWorker
-}
-```
+**کلید:** هر صفحه مبدأ فقط از یک منبع خوانده می‌شود (هرگز هر دو). این منطق درخواست کاربر را دقیقاً پیاده می‌کند.
 
 ---
 
@@ -137,7 +140,7 @@ export async function computeAndStoreCandidates(
 
 ## معیار پذیرش
 
-1. آپلود CSV با ~۷۰۰ صفحه → ورود به صفحه پروژه در زیر ۱.۵ ثانیه.
+1. آپلود CSV با ~۷۰۰ صفحه → ورود به صفحه پروژه د�� زیر ۱.۵ ثانیه.
 2. کلیک «بررسی الگوریتم» روی همان پروژه → اتمام در زیر ۱.۵ ثانیه.
 3. پروژه با > ۱۰۰۰ صفحه همچنان از Worker استفاده می‌کند و UI freeze نمی‌شود.
 4. خروجی `candidates` و `idfCache` در Dexie برای یک پروژه ثابت بین Fast-Track و Heavy-Track یکسان است (با تغییر آستانه به مقادیر متفاوت و مقایسه تست شود).
