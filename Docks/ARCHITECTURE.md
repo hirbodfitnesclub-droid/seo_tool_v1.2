@@ -467,7 +467,318 @@ export function useInlinkAnalytics(projectId: number, targetPageId: number): {
 
 ---
 
-## ۱۰. نکات امنیتی (بدون تغییر)
+---
+
+## ۱۱. Live / Temporal Boost — هوشمندسازی فصلی-زمانی (فاز ۲ — فیچر F2)
+
+### مسئله
+تا R13 امتیازدهی کاندیداها فقط بر اساس شباهت دسته‌بندی‌ها بود. اما برای یک سایت تور، در فصل پاییز نمایش پیشنهاد «تور آنتالیا تابستان» به اندازه پیشنهاد «تور پاییز کیش» مفید نیست. باید **زمان فعلی شمسی** + **مناسبت‌های آینده/جاری** به‌صورت یک لایه ثانویه روی امتیاز خام اعمال شود تا ترتیب نمایش متناسب با لحظه فعلی شود.
+
+### تصمیم معماری بنیادی — Pure In-memory Middleware
+این فیچر **هیچ‌گاه** داده Dexie را تغییر نمی‌دهد. یک سرویس Pure در Layer 3 می‌سازیم که آرایه‌ای از کاندیداها (یا لینک‌های نتیجه) را می‌گیرد و آرایه‌ای جدید با امتیاز Boost‌شده برمی‌گرداند:
+
+```
+[Dexie raw data: candidate.score = 12]
+        │
+        ▼
+[در زمان نمایش / sort قبل از render]
+        │
+        ▼
+temporalService.applyBoost(candidates, context)
+        │
+        ▼
+[in-memory: candidate.boostedScore = 12 * 4 = 48 (مناسبت پیش‌واز)]
+        │
+        ▼
+UI sort by boostedScore desc → نمایش
+```
+
+**اصل کلیدی:** فیلد `score` خام در `candidate.candidate_list` تغییر نمی‌کند. یک فیلد محاسبه‌شده `boostedScore: number` و `boostMeta: { factor, reason, matchedKeywords }` فقط در حافظه اضافه می‌شود.
+
+### معماری لایه‌ای فیچر F2
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│ Layer 1 — UI                                                 │
+│  • Config.tsx               → Toggle گلوبال + بخش CSV مناسبت │
+│  • PageDetail.tsx           → Quick Toggle (سوییچ سریع)      │
+│  • OccasionManager.tsx      → کامپوننت آپلود/دانلود/لیست CSV │
+│  • TemporalBoostBadge.tsx   → نشانه روی کاندیداهای Boost‌شده  │
+└────────────────────────┬─────────────────────────────────────┘
+                         │ useContext + hooks
+┌────────────────────────▼─────────────────────────────────────┐
+│ Layer 2 — State                                              │
+│  • TemporalBoostContext.tsx → state گلوبال (enabled per-proj)│
+│  • useTemporalBoost.ts      → API ساده برای کامپوننت‌ها       │
+│  • useBoostedCandidates.ts  → wrapper روی data + service     │
+└────────────────────────┬─────────────────────────────────────┘
+                         │
+┌────────────────────────▼─────────────────────────────────────┐
+│ Layer 3 — Service (هسته فیچر — Pure)                         │
+│  • temporalService.ts       → applyBoost, getCurrentContext  │
+│  • occasionService.ts       → load/save/validate CSV         │
+│  • occasionCsvParser.ts     → parse CSV با Zod              │
+└────────────────────────┬─────────────────────────────────────┘
+                         │
+┌────────────────────────▼─────────────────────────────────────┐
+│ Layer 4 — Pure Core                                          │
+│  • persianDate.ts           → Intl.DateTimeFormat helpers    │
+│  • builtInOccasions.ts      → ماه‌ها/فصل‌های شمسی پیش‌فرض      │
+└──────────────────────────────────────────────────────────────┘
+
+ذخیره‌سازی:
+  localStorage:
+    LINKMESH_TEMPORAL_BOOST_v1::{projectId}  → { enabled: boolean }
+    LINKMESH_OCCASIONS_v1::{projectId}        → Occasion[]
+```
+
+### قراردادهای داده (Types)
+
+```ts
+// src/services/temporal/types.ts
+export interface Occasion {
+  id: string;                 // uuid v4 (crypto.randomUUID)
+  name: string;               // مثلاً "نوروز ۱۴۰۴"
+  startMonth: number;         // 1..12 شمسی
+  startDay: number;           // 1..31
+  endMonth: number;
+  endDay: number;
+  keywords: string[];         // ["نوروز", "عید", "تعطیلات نوروز"]
+  source: 'user-csv' | 'built-in-month' | 'built-in-season';
+}
+
+export interface TemporalContext {
+  jYear: number;              // مثلاً 1404
+  jMonth: number;             // 1..12
+  jDay: number;               // 1..31
+  currentMonthName: string;   // 'فروردین' ...
+  currentSeasonName: string;  // 'بهار' ...
+  /** مناسبت‌های فعلی + ۶۰ روز آینده */
+  activeOccasions: Array<{
+    occasion: Occasion;
+    phase: 'pre-event' | 'current';
+    daysUntilStart: number;   // اگر current باشد ۰
+  }>;
+}
+
+export type BoostFactor = 4 | 3 | 1 | 0.1;
+
+export interface BoostMeta {
+  factor: BoostFactor;
+  reason: 'pre-event' | 'current' | 'neutral' | 'out-of-season';
+  matchedKeywords: string[];
+  matchedOccasionId?: string;
+}
+
+export interface BoostedCandidate {
+  page_id: number;
+  title: string;
+  score: number;              // امتیاز خام (دست‌نخورده)
+  boostedScore: number;       // score * factor
+  matched_tags?: string[];
+  boost: BoostMeta;
+}
+```
+
+### قواعد محاسبه ضریب (سخت‌گیرانه)
+
+ورودی `applyBoost`:
+- لیست کاندیداها (هر کدام دارای `title` و `matched_tags`)
+- `TemporalContext` (محاسبه‌شده توسط `getCurrentContext`)
+- وضعیت `enabled` فیچر
+
+اگر `enabled === false`: تابع کاندیداها را با `factor: 1, reason: 'neutral'` و `boostedScore = score` برمی‌گرداند (No-op). این باعث می‌شود UI بدون شاخه‌بندی if/else همیشه از همین تابع استفاده کند.
+
+اگر `enabled === true`، برای هر کاندیدا:
+1. مجموعه «متن قابل جستجو» = `title.toLowerCase()` + هر تگ از `matched_tags`.
+2. به‌ازای هر مناسبت در `activeOccasions`: اگر حداقل یک keyword (lowercase) در متن قابل جستجو پیدا شد → ثبت match.
+3. تعیین فاز:
+   - اگر یک match با `phase === 'pre-event'` (فاصله ۳۰ تا ۶۰ روز) → `factor = 4`، `reason = 'pre-event'`.
+   - اگر یک match با `phase === 'current'` → `factor = 3`، `reason = 'current'`. (اولویت با pre-event برای بیشینه‌سازی Boost.)
+4. اگر هیچ match نبود ولی متن حاوی **نام ماه یا فصل دیگری** بود (از لیست `PERSIAN_MONTHS_ORDER` یا فصل‌های ۴گانه که با ماه/فصل فعلی **مغایر** است) → `factor = 0.1`، `reason = 'out-of-season'`.
+5. در غیر این صورت → `factor = 1`، `reason = 'neutral'`.
+
+> ترتیب اولویت قطعی: **pre-event > current > out-of-season > neutral**.
+
+### اولویت تشخیص ضریب (Decision Tree)
+
+```
+for each candidate:
+  matchedPre = matchOccasions(text, activeOccasions, phase='pre-event')
+  matchedCur = matchOccasions(text, activeOccasions, phase='current')
+  
+  if matchedPre.length > 0:
+    factor = 4, reason = 'pre-event'
+  elif matchedCur.length > 0:
+    factor = 3, reason = 'current'
+  elif containsConflictingMonthOrSeason(text, ctx):
+    factor = 0.1, reason = 'out-of-season'
+  else:
+    factor = 1, reason = 'neutral'
+  
+  boostedScore = rawScore * factor
+```
+
+### استخراج تاریخ شمسی (هسته Layer 4)
+
+```ts
+// src/core/temporal/persianDate.ts
+export function getJalaliToday(): { jYear: number; jMonth: number; jDay: number } {
+  const parts = new Intl.DateTimeFormat('fa-IR-u-ca-persian-nu-latn', {
+    year: 'numeric', month: 'numeric', day: 'numeric'
+  }).formatToParts(new Date());
+  
+  const get = (t: string) => Number(parts.find(p => p.type === t)?.value);
+  return { jYear: get('year'), jMonth: get('month'), jDay: get('day') };
+}
+```
+
+این تنها مسیر مجاز برای دریافت تاریخ شمسی است. **ممنوع:** استفاده از regex روی خروجی `toLocaleDateString` یا parse دستی رشته فارسی.
+
+### محاسبه فاصله روز بین دو تاریخ شمسی
+چون تبدیل دقیق شمسی↔میلادی بدون کتابخانه پیچیده است و دقت روزانه مطلق نیاز نداریم، از یک **تخمین کافی** استفاده می‌کنیم: تبدیل هر تاریخ شمسی به یک «روز عددی سال» (`dayOfYear`) با جدول طول ماه‌های شمسی (۶ماه اول ۳۱ روز، ۵ماه بعد ۳۰ روز، اسفند ۲۹ یا ۳۰ روز در سال کبیسه — برای محاسبه فاصله ۶۰ روزه دقت روز ۲۹ام اسفند تأثیری ندارد). فاصله = `((endYear - startYear) * 365 + endDayOfYear - startDayOfYear)`.
+
+> **قانون:** این محاسبه فقط برای تشخیص فاز `pre-event` (۳۰ تا ۶۰ روز آینده) استفاده می‌شود؛ پس خطای ±۱ روز قابل قبول است.
+
+### مناسبت‌های Built-in (پیش‌فرض، بدون نیاز به CSV)
+
+`src/core/temporal/builtInOccasions.ts` لیستی هاردکد می‌سازد که شامل:
+- ۱۲ ماه شمسی به‌عنوان «مناسبت ماه» با کلیدواژه نام ماه:
+  ```
+  { name: 'فروردین', startMonth: 1, startDay: 1, endMonth: 1, endDay: 31, keywords: ['فروردین'], source: 'built-in-month' }
+  ```
+- ۴ فصل شمسی به‌عنوان «مناسبت فصل» با کلیدواژه‌ها:
+  ```
+  { name: 'بهار', startMonth: 1, startDay: 1, endMonth: 3, endDay: 31, keywords: ['بهار', 'بهاری'], source: 'built-in-season' }
+  ```
+
+این لیست **همیشه** به مناسبت‌های CSV کاربر concat می‌شود (User CSV اولویت ندارد، صرفاً اضافه می‌شود — هر دو همزمان فعال‌اند).
+
+### CSV مناسبت‌ها — قرارداد فایل
+
+ستون‌های اجباری (دقیقاً به این نام‌ها):
+| نام_مناسبت | تاریخ_شروع_شمسی | تاریخ_پایان_شمسی | کلمات_کلیدی |
+|---|---|---|---|
+| نوروز ۱۴۰۴ | 1/1 | 1/13 | نوروز, عید, تعطیلات نوروز |
+| یلدا | 9/30 | 9/30 | یلدا, شب چله |
+
+- فرمت تاریخ: `MM/DD` شمسی (سال ندارد — هر سال تکرار می‌شود).
+- `کلمات_کلیدی`: جداشده با کاما.
+- اعتبارسنجی با Zod (`occasionCsvSchema`).
+- اگر یک ردیف نامعتبر بود، آن ردیف skip می‌شود + پیام خطا در گزارش (مشابه الگوی `csvParser.ts` فعلی).
+- **اگر کل فایل ساختار اشتباه داشت** (هدر اشتباه)، Toast خطا + دکمه «دانلود تمپلیت» نمایش داده می‌شود.
+
+تابع تولید تمپلیت:
+```ts
+// src/services/temporal/occasionCsvParser.ts
+export function generateOccasionTemplateBlob(): Blob;
+```
+که یک CSV با هدر فارسی + ۲ ردیف نمونه (نوروز، یلدا) برمی‌گرداند.
+
+### ذخیره‌سازی State (به‌جای Zustand → Context + localStorage)
+
+`src/contexts/TemporalBoostContext.tsx`:
+```ts
+interface TemporalBoostState {
+  enabledByProject: Record<number, boolean>;  // projectId → enabled
+  toggleProject: (projectId: number, value: boolean) => void;
+  isEnabled: (projectId: number) => boolean;
+}
+```
+
+- در `useEffect` اول mount: از `localStorage.getItem('LINKMESH_TEMPORAL_BOOST_v1')` بخواند.
+- در هر `toggleProject`: state داخلی + localStorage هر دو آپدیت می‌شوند.
+- این Provider باید در `App.tsx` بالای `<RouterProvider>` قرار بگیرد.
+- **به‌خاطر اینکه Provider بالادست است، هر تغییر toggle از Config.tsx یا PageDetail.tsx بلافاصله و reactive روی هر دو صفحه منعکس می‌شود** — همان رفتاری که با Zustand انتظار می‌رفت، با هزینه صفر کتابخانه.
+
+### جریان داده در زمان نمایش
+
+```
+PageDetail.tsx
+   │ candidates = [{score: 12, title: 'تور پاییز کیش', tags: ['پاییز','کیش']}, ...]
+   ▼
+useBoostedCandidates(projectId, candidates)
+   │ enabled = useTemporalBoost(projectId)
+   │ ctx     = await temporalService.getCurrentContext(projectId)  ← cached per-day
+   ▼
+temporalService.applyBoost(candidates, ctx, enabled)
+   │ خروجی: BoostedCandidate[] با sort نزولی بر boostedScore
+   ▼
+UI: render با Badge برای reason ∈ {pre-event, current, out-of-season}
+```
+
+### کش `TemporalContext`
+
+محاسبه `getCurrentContext` فقط شامل: یک‌بار خواندن `getJalaliToday()` + iterate روی occasions و تشخیص phase. هزینه‌اش ناچیز است، اما برای جلوگیری از اجرای مکرر در re-render، یک کش module-level در `temporalService.ts` نگه می‌داریم که بر اساس `(projectId, jYear-jMonth-jDay)` invalid می‌شود. تغییر مناسبت‌ها (آپلود CSV جدید) → `temporalService.invalidateProject(projectId)` صدا زده شود.
+
+### تأثیر روی صفحات موجود
+
+**PageDetail.tsx:**
+- یک Switch بالای لیست کاندیداها (Quick Toggle).
+- لیست کاندیداها از طریق `useBoostedCandidates` می‌آید (نه مستقیم از repository).
+- روی هر کارت کاندیدا اگر `boost.reason !== 'neutral'`، یک `<TemporalBoostBadge>` نمایش داده می‌شود.
+
+**Config.tsx:**
+- یک section جدید با عنوان «هوشمندسازی فصلی (Live Boost)» شامل:
+  - Toggle گلوبال
+  - دکمه دانلود تمپلیت CSV
+  - input آپلود CSV مناسبت‌ها
+  - لیست مناسبت‌های فعلی (با امکان حذف فردی هر مناسبت)
+  - نمایش تاریخ شمسی فعلی + لیست مناسبت‌های فعال (debugging UI)
+
+**Results.tsx:**
+- اختیاری: اگر toggle روشن، امتیاز Boost‌شده روی نمایش نهایی هم اعمال شود (مرتب‌سازی نتایج تایید‌شده).
+
+**scorer.ts و queueProcessor و Web Worker:** **بدون تغییر**. Temporal Boost هرگز در مسیر write به Dexie یا فراخوانی AI دخیل نمی‌شود.
+
+### درخت فایل افزوده‌شده توسط F2 (فقط فایل‌های جدید/ویرایشی)
+
+```
+src/
+├── core/
+│   └── temporal/                       ← [جدید] Layer 4 - Pure
+│       ├── persianDate.ts              ← [جدید]
+│       └── builtInOccasions.ts         ← [جدید]
+│
+├── services/
+│   └── temporal/                       ← [جدید] Layer 3
+│       ├── types.ts                    ← [جدید]
+│       ├── temporalService.ts          ← [جدید] applyBoost + getCurrentContext
+│       ├── occasionService.ts          ← [جدید] load/save/list/remove + localStorage
+│       └── occasionCsvParser.ts        ← [جدید] Zod-based parse + template generator
+│
+├── contexts/
+│   └── TemporalBoostContext.tsx        ← [جدید]
+│
+├── hooks/
+│   ├── useTemporalBoost.ts             ← [جدید] selector روی Context
+│   └── useBoostedCandidates.ts         ← [جدید] wrapper روی applyBoost
+│
+├── components/
+│   ├── OccasionManager.tsx             ← [جدید] CSV upload/download/list (در Config)
+│   └── TemporalBoostBadge.tsx          ← [جدید] نشانه روی کارت کاندیدا
+│
+├── pages/
+│   ├── Config.tsx                      ← [ویرایش] افزودن section + OccasionManager
+│   └── PageDetail.tsx                  ← [ویرایش] افزودن Quick Toggle + Badge
+│
+└── App.tsx                             ← [ویرایش] wrap با TemporalBoostProvider
+```
+
+### قواعد قرمز فیچر F2 (الزامی)
+
+1. ⛔ **هیچ تغییر در `db.ts`**.
+2. ⛔ **هیچ نوشتن در جداول `candidates` یا `results`** برای ذخیره `boostedScore`.
+3. ⛔ **هیچ import کتابخانه تاریخ خارجی** (moment, dayjs, jalaali-js, ...).
+4. ⛔ **هیچ Zustand/Redux/MobX**. فقط Context + localStorage.
+5. ⛔ **هیچ تغییر در `scorer.ts` یا `idfCalculator.ts`** (همان قانون مطلق فاز).
+6. ⛔ **هیچ تماس شبکه‌ای** برای دریافت زمان یا مناسبت.
+7. ✅ تابع `applyBoost` باید **Pure** باشد (deterministic، قابل تست واحد بدون mock).
+8. ✅ اگر toggle خاموش است، خروجی `applyBoost` از نظر ترتیب باید **بایت-به-بایت** برابر ورودی باشد.
+
+---
+
+## ۱۲. نکات امنیتی (بدون تغییر)
 
 - کلید Gemini API فقط در `localStorage` با کلید `LINKMESH_API_KEY`
 - در حال حاضر یک proxy روی `/api/gemini` (server.ts) وجود دارد که کلید را از env می‌خواند — این پابرجاست

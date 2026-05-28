@@ -222,7 +222,7 @@
 ### هدف
 وقتی کاربر در میان پردازش تب را می‌بندد و دوباره باز می‌کند، صف‌هایی که status='processing' دارند ولی updated_at آن‌ها قدیمی است باید به وضعیت 'paused' تبدیل شوند تا کاربر بتواند آگاهانه resume کند.
 
-### راهنمای پیاده‌سازی فن����
+### راهنمای پیاده‌سازی فن������
 ۱. `src/repositories/queueRepository.ts` (از تسک R1) — متد `findInterrupted()` را پیاده کن:
    - تمام رکوردهای `status === 'processing'` که `updated_at` آن‌ها بیش از ۳۰ ثانیه از زمان فعلی فاصله دارد را بازگرداند.
 
@@ -331,7 +331,7 @@
 
 ۳. فایل کپی مرجع `/scorer.ts` در ریشه پروژه را **دست نزن**؛ این متعلق به کاربر است و او خودش حذف می‌کند.
 
-۴. اجرای typecheck نهایی: `pnpm exec tsc --noEmit` (یا معاد�� با package manager پروژه).
+۴. اجرای typecheck نهایی: `pnpm exec tsc --noEmit` (یا م��اد�� با package manager پروژه).
 
 ### محدودیت‌ها
 - ✅ بعد از این تسک، هیچ import کوچک‌ترین خطا نداشته باشد
@@ -442,7 +442,7 @@ R2, R3, R4 می‌توانند مستقل اجرا شوند ولی همگی به
 
 ۱. **حق نداری هیچ کدی رو حدس بزنی؛ همین الان با ابزار caling_tool فایل های کانتکست رو به صورت زنده فراخوانی کن و بخون و سپس کد این تسک رو بزن.**
 
-۲. **خط قرمز مطلق:** `src/db.ts` لمس نمی‌شود. هیچ جدول/ایندکس/migration جدید. اسکیمای Dexie v3 ثابت است.
+۲. **خط قرمز مطلق:** `src/db.ts` لمس نمی‌شود. هیچ جدول/ایندکس/migration ج��ید. اسکیمای Dexie v3 ثابت است.
 
 ۳. **خط قرمز مطلق:** `src/core/scoring/scorer.ts` و `src/core/scoring/idfCalculator.ts` لمس نمی‌شوند.
 
@@ -704,3 +704,319 @@ F1.1 (Reverse Index Service)
 4. کلیک روی مودال در میانه build → Spinner داخل مودال، سپس لیست.
 5. منطق Hybrid: صفحاتی که در `results` هستند فقط از آنجا خوانده می‌شوند، بقیه از `candidates`.
 6. `tsc --noEmit` بدون خطا.
+
+---
+---
+
+# 🚀 فیچر F2 — Live / Temporal Boost (هوشمندسازی فصلی-زمانی)
+
+> این فیچر یک **لایه دوم پردازشی in-memory** است که امتیاز خام کاندیداها را با ضریب فصلی/مناسبتی تنظیم می‌کند. **هیچ تغییر در Dexie، scorer، یا منطق ذخیره‌سازی نمی‌دهد.** قبل از شروع، بخش §۱۱ از `Docks/ARCHITECTURE.md` را الزاماً بخوان.
+
+## قوانین مشترک F2 (الزامی)
+۱. حق نداری حدس بزنی؛ همین الان فایل‌های `CONTEXT_FILES` را زنده بخوان.
+۲. ⛔ ممنوع: تغییر `db.ts`، نوشتن `boostedScore` در Dexie، کتابخانه تاریخ خارجی، Zustand/Redux، تماس شبکه‌ای، تغییر `scorer.ts`.
+۳. ✅ فقط `Intl.DateTimeFormat('fa-IR-u-ca-persian-nu-latn').formatToParts(new Date())`.
+۴. تابع `applyBoost` باید **Pure** باشد. اگر toggle خاموش است، ترتیب خروجی برابر ورودی.
+۵. کامنت‌ها فارسی. متن UI فارسی. RTL.
+
+---
+
+## تسک F2.1 — Layer 4 Pure Core (persianDate + builtInOccasions)
+
+### هدف
+ساخت دو فایل ناب در `src/core/temporal/` که هیچ وابستگی به DOM/Dexie/React ندارند و قابل تست واحد هستند.
+
+### راهنمای پیاده‌سازی فنی
+۱. پوشه `src/core/temporal/` بساز.
+
+۲. فایل `src/core/temporal/persianDate.ts` با این Exportها:
+   - `getJalaliToday(): { jYear: number; jMonth: number; jDay: number }` — با `Intl.DateTimeFormat('fa-IR-u-ca-persian-nu-latn', {year:'numeric',month:'numeric',day:'numeric'}).formatToParts(new Date())` و استخراج عددی هر part.
+   - `MONTH_LENGTHS: readonly number[]` = `[31,31,31,31,31,31,30,30,30,30,30,29]` (ماه‌های شمسی — اسفند ۲۹، کبیسه را نادیده بگیر).
+   - `jalaliDayOfYear(jMonth: number, jDay: number): number` — مجموع طول ماه‌های قبل + jDay.
+   - `daysBetweenSamePeriod(fromMonth, fromDay, toMonth, toDay): number` — تفاضل dayOfYear (مثبت یعنی to بعد از from). اگر منفی شد یعنی to در سال آینده است → نتیجه = ۳۶۵ + تفاضل.
+   - `getMonthName(jMonth: number): string` — از `PERSIAN_MONTHS_ORDER` در `constants/categories.ts`.
+   - `getSeasonName(jMonth: number): string` — از `MONTH_TO_SEASON`.
+   - `isInRange(jMonth, jDay, startMonth, startDay, endMonth, endDay): boolean` — آیا تاریخ فعلی داخل بازه است (با در نظر گرفتن wrap-around سال).
+
+۳. فایل `src/core/temporal/builtInOccasions.ts` با Export:
+   - تابع `getBuiltInOccasions(): Occasion[]` که یک آرایه تولید می‌کند شامل:
+     - ۱۲ مناسبت ماه با `source: 'built-in-month'`, `keywords: [monthName]`.
+     - ۴ مناسبت فصل با `source: 'built-in-season'`, `keywords: [seasonName, seasonName+'ی']` (مثل `['بهار','بهاری']`).
+   - id برای built-inها به‌صورت ثابت: `'built-in-month-1'..'built-in-month-12'` و `'built-in-season-spring'`, `'-summer'`, `'-autumn'`, `'-winter'`.
+
+### محدودیت‌ها
+- ✅ هیچ import از `db`, `window`, `document`, React.
+- ✅ فقط ESM، فقط TypeScript pure.
+- ✅ تایپ `Occasion` از `src/services/temporal/types.ts` import شود (که در تسک بعد ساخته می‌شود — این تسک پس از F2.2 شروع می‌شود **یا** type را موقتاً به‌صورت محلی تعریف کن و در F2.2 به مسیر اصلی منتقل کن).
+
+> ✅ **تصمیم معمار:** برای حذف وابستگی دایره‌ای، تایپ `Occasion` را در `src/services/temporal/types.ts` ابتدا بساز (در F2.2)، سپس به آن import کن. **پس F2.2 قبل از F2.1 اجرا می‌شود.** ترتیب نهایی در پایین این سند آمده.
+
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/constants/categories.ts", "src/services/temporal/types.ts"]`
+
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان فایل های کانتکست رو زنده بخوان.
+
+---
+
+## تسک F2.2 — Layer 3 Types + Occasion CSV Parser (Zod)
+
+### هدف
+تعریف قراردادهای داده فیچر و یک Parser/Generator امن برای CSV مناسبت‌ها.
+
+### راهنمای پیاده‌سازی فنی
+۱. پوشه `src/services/temporal/` بساز.
+
+۲. فایل `src/services/temporal/types.ts`:
+   - export interface `Occasion` با فیلدها: `id: string, name: string, startMonth: number, startDay: number, endMonth: number, endDay: number, keywords: string[], source: 'user-csv' | 'built-in-month' | 'built-in-season'`.
+   - export interface `TemporalContext` (مطابق §۱۱ ARCHITECTURE).
+   - export type `BoostFactor = 4 | 3 | 1 | 0.1`.
+   - export interface `BoostMeta` و `BoostedCandidate`.
+   - export interface `OccasionParseResult { occasions: Occasion[]; errors: string[] }`.
+
+۳. فایل `src/services/temporal/occasionCsvParser.ts`:
+   - import `Papa` از `papaparse` و `z` از `zod` (هر دو موجودند، تأیید با `package.json`).
+   - schema:
+     ```ts
+     const RawRowSchema = z.object({
+       'نام_مناسبت': z.string().min(1),
+       'تاریخ_شروع_شمسی': z.string().regex(/^\d{1,2}\/\d{1,2}$/),
+       'تاریخ_پایان_شمسی': z.string().regex(/^\d{1,2}\/\d{1,2}$/),
+       'کلمات_کلیدی': z.string().min(1)
+     });
+     ```
+   - تابع `parseOccasionCSV(file: File): Promise<OccasionParseResult>`:
+     - با Papa.parse با `header: true, skipEmptyLines: true` پارس کن.
+     - اگر هدر فایل ستون‌های اجباری را ندارد → کل عملیات ناموفق و یک خطای واضح برگردان (`['ساختار فایل اشتباه است. لطفاً از تمپلیت رسمی استفاده کنید.']`).
+     - برای هر ردیف `safeParse` → اگر invalid، skip + اضافه به errors (`ردیف N: ...`).
+     - تبدیل `تاریخ_شروع_شمسی` (`"1/1"`) به `startMonth: 1, startDay: 1`. ولیدیشن `1 ≤ month ≤ 12, 1 ≤ day ≤ 31` با چک عددی پس از split.
+     - `keywords`: split با `,` + `.trim()` + filter Boolean.
+     - id: `crypto.randomUUID()`.
+     - `source: 'user-csv'`.
+   - تابع `generateOccasionTemplateBlob(): Blob`:
+     - یک string CSV با BOM (`\ufeff`) + هدر `نام_مناسبت,تاریخ_شروع_شمسی,تاریخ_پایان_شمسی,کلمات_کلیدی\n` + ۳ ردیف نمونه: نوروز (`1/1, 1/13, "نوروز,عید,تعطیلات نوروز"`)، یلدا (`9/30, 9/30, "یلدا,شب چله"`)، تابستان (`4/1, 6/31, "تابستان,تابستانی"`).
+     - برگرداندن `new Blob([csv], { type: 'text/csv;charset=utf-8;' })`.
+
+### محدودیت‌ها
+- ✅ هیچ نصب پکیج جدید؛ Papa و Zod از قبل هستند.
+- ✅ Parser باید همان pattern تنفس Event Loop (`await new Promise(r => setTimeout(r, 0))` هر ۱۰۰ ردیف) را داشته باشد — همانند `src/services/io/csvParser.ts`.
+- ⛔ هیچ ذخیره‌سازی در این فایل. فقط parse و برگرداندن.
+
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/services/io/csvParser.ts", "src/constants/categories.ts", "package.json"]`
+
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان فایل های کانتکست رو زنده بخوان.
+
+---
+
+## تسک F2.3 — Layer 3 Occasion Service (localStorage CRUD)
+
+### هدف
+مدیریت ذخیره/بازیابی/حذف مناسبت‌های کاربر در `localStorage` با namespace per-project.
+
+### راهنمای پیاده‌سازی فنی
+۱. فایل `src/services/temporal/occasionService.ts`:
+   - ثابت `STORAGE_PREFIX = 'LINKMESH_OCCASIONS_v1::'`.
+   - تابع `loadUserOccasions(projectId: number): Occasion[]` — خواندن از localStorage، JSON.parse با try/catch، در صورت خطا → `[]`.
+   - تابع `saveUserOccasions(projectId: number, occasions: Occasion[]): void` — `JSON.stringify` + setItem.
+   - تابع `appendUserOccasions(projectId: number, newItems: Occasion[]): Occasion[]` — load + concat + save + return.
+   - تابع `removeUserOccasion(projectId: number, occasionId: string): Occasion[]` — load + filter + save + return.
+   - تابع `clearUserOccasions(projectId: number): void` — `removeItem`.
+   - تابع `listAllOccasions(projectId: number): Occasion[]` — `[...getBuiltInOccasions(), ...loadUserOccasions(projectId)]`.
+   - بعد از **هر** تابع تغییرگر (`save`, `append`, `remove`, `clear`)، تابع `temporalService.invalidateProject(projectId)` فراخوانی شود تا کش Context باطل شود.
+
+۲. هر تابع را با کامنت فارسی هدر مستند کن.
+
+### محدودیت‌ها
+- ✅ هیچ ارجاع به Dexie یا React.
+- ✅ هندل امن `localStorage` (در صورت quota error → console.warn، نه crash).
+
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/services/temporal/types.ts", "src/core/temporal/builtInOccasions.ts"]`
+
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان فایل های کانتکست رو زنده بخوان.
+
+---
+
+## تسک F2.4 — Layer 3 temporalService.ts (هسته Boost)
+
+### هدف
+**مهم‌ترین فایل F2.** ساخت `applyBoost` به‌صورت Pure Function و `getCurrentContext` با کش.
+
+### راهنمای پیاده‌سازی فنی
+۱. فایل `src/services/temporal/temporalService.ts`:
+
+#### الف) کش Context
+```ts
+type CacheKey = string; // `${projectId}::${jYear}-${jMonth}-${jDay}`
+const contextCache = new Map<CacheKey, TemporalContext>();
+```
+
+#### ب) `getCurrentContext(projectId: number): TemporalContext`
+- `{ jYear, jMonth, jDay } = getJalaliToday()`.
+- ساخت کلید کش؛ اگر در کش هست → برگردان.
+- بارگذاری همه مناسبت‌ها: `listAllOccasions(projectId)`.
+- برای هر مناسبت محاسبه فاز:
+  - اگر `isInRange(jMonth, jDay, occ.startMonth, occ.startDay, occ.endMonth, occ.endDay)` → `phase = 'current', daysUntilStart = 0`.
+  - وگرنه: `days = daysBetweenSamePeriod(jMonth, jDay, occ.startMonth, occ.startDay)`. اگر `30 <= days <= 60` → `phase = 'pre-event'`. در غیر این صورت skip.
+- خروجی: `{ jYear, jMonth, jDay, currentMonthName, currentSeasonName, activeOccasions }`.
+- ذخیره در کش و return.
+
+#### ج) `invalidateProject(projectId: number): void`
+- حذف همه کلیدهایی که با `${projectId}::` شروع می‌شوند.
+
+#### د) `applyBoost(candidates: Array<{page_id:number; title:string; score:number; matched_tags?:string[]}>, ctx: TemporalContext, enabled: boolean): BoostedCandidate[]`
+- **اگر `enabled === false`:** هر کاندیدا را با `boost: {factor:1, reason:'neutral', matchedKeywords:[]}` و `boostedScore = score` برگردان، **بدون تغییر ترتیب**.
+- **اگر `enabled === true`:** برای هر کاندیدا:
+  1. `searchText = (title + ' ' + (matched_tags||[]).join(' ')).toLowerCase()`.
+  2. `matchedPre` = مناسبت‌هایی که حداقل یک keyword.toLowerCase() در searchText وجود دارد و `phase === 'pre-event'`.
+  3. `matchedCur` = مشابه برای `phase === 'current'`.
+  4. تعیین `factor` و `reason`:
+     - اگر `matchedPre.length > 0` → `factor=4, reason='pre-event'`, `matchedKeywords` = ادغام کلیدواژه‌های match‌شده، `matchedOccasionId` = اولین.
+     - elif `matchedCur.length > 0` → `factor=3, reason='current'`.
+     - elif `containsConflictingMonthOrSeason(searchText, ctx)` → `factor=0.1, reason='out-of-season'`.
+     - else → `factor=1, reason='neutral'`.
+  5. `boostedScore = score * factor`.
+- در پایان: `.sort((a,b) => b.boostedScore - a.boostedScore)`.
+
+#### هـ) `containsConflictingMonthOrSeason(text: string, ctx: TemporalContext): { conflict: boolean }`
+- لیست ماه‌های دیگر (به‌جز `currentMonthName`) و فصل‌های دیگر (به‌جز `currentSeasonName`) را با `PERSIAN_MONTHS_ORDER` و فصل‌ها بساز.
+- اگر `text` حاوی هر کدام از این نام‌ها بود → conflict=true.
+- در غیر این صورت → false.
+
+### محدودیت‌ها
+- ✅ تابع `applyBoost` کاملاً Pure. هیچ ارجاع به Date/localStorage داخل آن (context از بیرون پاس داده می‌شود).
+- ✅ ترتیب اولویت دقیقاً: pre-event > current > out-of-season > neutral.
+- ⛔ هیچ mutation روی آرایه ورودی.
+
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/services/temporal/types.ts", "src/services/temporal/occasionService.ts", "src/core/temporal/persianDate.ts", "src/core/temporal/builtInOccasions.ts", "src/constants/categories.ts"]`
+
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان فایل های کانتکست رو زنده بخوان.
+
+---
+
+## تسک F2.5 — Layer 2 Context + Hooks
+
+### هدف
+ساخت Provider Context برای toggle گلوبال + دو هوک selector برای UI.
+
+### راهنمای پیاده‌سازی فنی
+۱. فایل `src/contexts/TemporalBoostContext.tsx`:
+   - `const STORAGE_KEY = 'LINKMESH_TEMPORAL_BOOST_v1';`
+   - state: `Record<number /*projectId*/, boolean>`.
+   - در `useEffect` mount: load از localStorage.
+   - متد `toggleProject(projectId, value)`: state update + persist به localStorage.
+   - export `TemporalBoostProvider` و `useTemporalBoostContext` (throw اگر بیرون Provider).
+
+۲. فایل `src/hooks/useTemporalBoost.ts`:
+   - `export function useTemporalBoost(projectId: number): { enabled: boolean; toggle: (v: boolean) => void }`.
+   - از Context می‌خواند.
+
+۳. فایل `src/hooks/useBoostedCandidates.ts`:
+   - signature: `useBoostedCandidates(projectId: number, candidates: RawCandidate[]): { boosted: BoostedCandidate[]; ctx: TemporalContext | null; loading: boolean }`.
+   - داخل: `useTemporalBoost(projectId).enabled` + `useEffect` که `temporalService.getCurrentContext(projectId)` صدا می‌زند و ctx را در state می‌گذارد.
+   - `useMemo` روی `[candidates, ctx, enabled]` که `applyBoost` را اجرا می‌کند.
+   - اگر `candidates` خالی یا ctx null → `boosted: candidates as any`, `loading: !ctx`.
+
+۴. در `src/App.tsx`:
+   - import `TemporalBoostProvider`.
+   - کل tree را با آن wrap کن (داخل `ToastProvider` اگر هست، یا بیرون آن — مهم: داخل Router).
+
+### محدودیت‌ها
+- ✅ بدون Zustand.
+- ✅ Context باید LSP-friendly: throw error در صورت استفاده بیرون Provider.
+- ⛔ بدون useLiveQuery (این داده Dexie نیست).
+
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/App.tsx", "src/contexts/ToastContext.tsx", "src/services/temporal/temporalService.ts", "src/services/temporal/types.ts"]`
+
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان فایل های کانتکست رو زنده بخوان.
+
+---
+
+## تسک F2.6 — Layer 1 OccasionManager + Config Integration
+
+### هدف
+ساخت کامپوننت مدیریت مناسبت‌ها (دانلود تمپلیت، آپلود CSV، نمایش لیست، حذف) و افزودن آن به `Config.tsx` به همراه toggle گلوبال.
+
+### راهنمای پیاده‌سازی فنی
+۱. کامپوننت `src/components/OccasionManager.tsx`:
+   - prop: `projectId: number`.
+   - state: `userOccasions: Occasion[]`, `errors: string[]`.
+   - دکمه «دانلود تمپلیت CSV»: `generateOccasionTemplateBlob()` → `URL.createObjectURL` → click trigger.
+   - input آپلود CSV (`<input type="file" accept=".csv">`): `parseOccasionCSV(file)` → اگر خطا داشت toast + نمایش پیام + دکمه «دانلود تمپلیت». در غیر این صورت `appendUserOccasions(projectId, occasions)` + toast موفقیت.
+   - لیست مناسبت‌های کاربر (نه built-in) با دکمه حذف هر کدام → `removeUserOccasion`.
+   - پایین کامپوننت: نمایش «تاریخ شمسی فعلی: YYYY/MM/DD» + لیست `activeOccasions` با نمایش phase و daysUntilStart.
+
+۲. ویرایش `src/pages/Config.tsx`:
+   - افزودن یک `<section>` جدید با عنوان «هوشمندسازی فصلی (Live Boost)» در `md:col-span-2`، بعد از section «روش امتیازدهی».
+   - داخل: یک Switch (`<button>` با style مشابه scoringMode buttons) برای toggle که با `useTemporalBoost(parseInt(projectId)).enabled` و `toggle()` کار می‌کند.
+   - زیر آن: `<OccasionManager projectId={parseInt(projectId)} />`.
+
+### محدودیت‌ها
+- ✅ فقط Tailwind. هیچ inline style.
+- ✅ UI فارسی + RTL.
+- ✅ Toast از `useToast` موجود.
+- ⛔ بدون افزودن کتابخانه DnD یا UI خارجی.
+
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/pages/Config.tsx", "src/components/ui/Button.tsx", "src/contexts/ToastContext.tsx", "src/hooks/useToast.ts", "src/hooks/useTemporalBoost.ts", "src/services/temporal/occasionService.ts", "src/services/temporal/occasionCsvParser.ts", "src/services/temporal/temporalService.ts"]`
+
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان فایل های کانتکست رو زنده بخوان.
+
+---
+
+## تسک F2.7 — Layer 1 PageDetail Quick Toggle + Boosted List + Badge
+
+### هدف
+اعمال Temporal Boost به‌صورت زنده روی لیست کاندیداهای صفحه جزئیات + سوییچ سریع.
+
+### راهنمای پیاده‌سازی فنی
+۱. کامپوننت `src/components/TemporalBoostBadge.tsx`:
+   - prop: `meta: BoostMeta`.
+   - اگر `reason === 'neutral'` → `return null`.
+   - اگر `'pre-event'` → badge سبز با متن «پیش‌واز مناسبت ×۴» + tooltip شامل `matchedKeywords`.
+   - اگر `'current'` → badge آبی با متن «در حال برگزاری ×۳».
+   - اگر `'out-of-season'` → badge خاکستری/قرمز کم‌رنگ با متن «خارج از فصل ×۰.۱».
+
+۲. ویرایش `src/pages/PageDetail.tsx`:
+   - بالای لیست کاندیداها یک Switch کوچک (Quick Toggle) که با `useTemporalBoost(projectId)` کار می‌کند.
+   - استخراج آرایه خام candidates از منبع فعلی (همان منبعی که الان استفاده می‌شود).
+   - `const { boosted, loading } = useBoostedCandidates(projectId, rawCandidates);`
+   - render: به‌جای `rawCandidates` از `boosted` استفاده کن.
+   - روی هر کارت کاندیدا، `<TemporalBoostBadge meta={cand.boost} />` نمایش بده.
+   - اگر `loading === true` و boost enabled → یک Spinner کوچک کنار toggle.
+
+### محدودیت‌ها
+- ✅ منطق نمایش امتیاز خام (`score`) همچنان قابل دیدن باشد؛ فقط ترتیب و badge اضافه می‌شود.
+- ✅ کلیک toggle بلافاصله ترتیب لیست را تغییر دهد (re-render reactive).
+- ⛔ بدون تغییر در منطق ذخیره result یا فراخوانی AI.
+- ⛔ بدون تغییر در `CandidateCard.tsx` بیش از افزودن یک optional prop `boostMeta?: BoostMeta` (اگر لازم بود).
+
+`CONTEXT_FILES: ["Docks/ARCHITECTURE.md", "src/pages/PageDetail.tsx", "src/components/CandidateCard.tsx", "src/hooks/useBoostedCandidates.ts", "src/hooks/useTemporalBoost.ts", "src/services/temporal/types.ts"]`
+
+> **یادآوری:** حق نداری هیچ کدی رو حدس بزنی؛ همین الان فایل های کانتکست رو زنده بخوان.
+
+---
+
+## ترتیب اجرای F2 (الزامی — غیرقابل موازی‌سازی)
+
+```
+F2.2 (Types + CSV Parser)
+  └→ F2.1 (persianDate + builtInOccasions)   ← به Occasion type نیاز دارد
+        └→ F2.3 (occasionService — localStorage)
+              └→ F2.4 (temporalService — applyBoost)         ← هسته فیچر
+                    └→ F2.5 (Context + Hooks + App.tsx wrap)
+                          ├→ F2.6 (Config + OccasionManager)
+                          └→ F2.7 (PageDetail + Badge)
+```
+
+**توضیح:** F2.6 و F2.7 می‌توانند **به ترتیب اجرا شوند** (نه موازی) چون هر دو فقط فایل خود را ویرایش می‌کنند و تداخل ندارند، اما برای حفظ تمرکز کدنویس، یکی پس از دیگری انجام شود.
+
+---
+
+## معیار پذیرش کل فیچر F2
+
+1. ⛔ هیچ تغییر در `src/db.ts` (diff خالی).
+2. ⛔ هیچ تغییر در `src/core/scoring/*` (diff خالی).
+3. ⛔ هیچ پکیج جدید در `package.json` (Papa + Zod از قبل هستند).
+4. ✅ Toggle خاموش → خروجی نمایش دقیقاً مانند قبل از فیچر (هم ترتیب، هم محتوا).
+5. ✅ Toggle روشن + مناسبت match → کارت با Badge مناسب + جابه‌جا شدن در sort.
+6. ✅ آپلود CSV نامعتبر → Toast خطا + پیشنهاد دانلود تمپلیت.
+7. ✅ بستن و باز کردن تب → وضعیت toggle و لیست مناسبت‌ها حفظ می‌شود (localStorage).
+8. ✅ `Intl.DateTimeFormat('fa-IR-u-ca-persian-nu-latn')` تنها مسیر دریافت تاریخ شمسی (با grep تأیید کن).
+9. ✅ `tsc --noEmit` بدون خطا.

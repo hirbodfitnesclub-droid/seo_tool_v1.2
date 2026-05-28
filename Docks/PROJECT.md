@@ -18,8 +18,17 @@
 
 > فاز ۱ (ساخت ویژگی‌ها) و فاز ۱.۵ (ریفکتور لایه‌ای) ۱۰۰٪ کامل هستند. اکنون وارد **فاز ۲ — توسعه ویژگی‌های جدید روی پایه معماری لایه‌ای** می‌شویم. اولین فیچر: **Inlink Analytics (گراف معکوس لینک‌سازی)**.
 
-### فیچر فعال: Inlink Analytics
+### فیچر F1 (تکمیل‌شده): Inlink Analytics
 سیستم تا الان **مبدأ-محور** بود (صفحه A به چه صفحاتی لینک می‌دهد). در فاز ۲ بُعد **مقصد-محور** اضافه می‌شود: «این صفحه از چه صفحاتی لینک ورودی می‌گیرد؟» با چالش این که هیچ ایندکس Dexie روی `target_page_id` داخل JSONها وجود ندارد و **خط قرمز مطلق** این است که اسکیمای دیتابیس (Dexie v3) لمس نشود.
+
+### فیچر F2 (در حال توسعه): Live / Temporal Boost — هوشمندسازی فصلی-زمانی
+یک **لایه دوم پردازشی** (Middleware in-memory) که زمان فعلی به تقویم شمسی را درک می‌کند و امتیاز خام کاندیداها/نتایج را **هنگام نمایش** با ضریب فصلی-مناسبتی بازنویسی می‌کند، **بدون لمس Dexie یا scorer**:
+- **ضریب 4x** برای کاندیداهایی که با مناسبت در «پیش‌واز» (۳۰ تا ۶۰ روز آینده) match می‌کنند.
+- **ضریب 3x** برای مناسبت/فصل/ماه جاری.
+- **جریمه 0.1x** برای کاندیداهای فصل/ماه گذشته یا نامرتبط.
+- فعال‌سازی گلوبال در `Config.tsx`، Quick Toggle در `PageDetail.tsx`.
+- منبع مناسبت‌ها: CSV قابل آپلود توسط کاربر + ماه‌ها/فصل‌های شمسی built-in.
+- استخراج تاریخ شمسی فقط با `Intl.DateTimeFormat('fa-IR-u-ca-persian-nu-latn')`.
 
 ### قانون مطلق این فاز
 **اسکیمای Dexie و الگوریتم `scorer.ts` تحت هیچ شرایطی تغییر نمی‌کنند.** هیچ migration جدید، هیچ ایندکس جدید، هیچ جدول جدید. تمام جست‌وجوهای جدید با ساخت ساختار داده in-memory روی داده‌های موجود انجام می‌شوند.
@@ -72,6 +81,12 @@
 | **اسکن کامل Dexie هنگام باز شدن مودال** | باعث UI Freeze می‌شود. Reverse Index باید lazy و chunked در پس‌زمینه ساخته شود |
 | **محاسبه Reverse Graph در Web Worker** | طبق درس R13، سربار IPC از خود کار بزرگ‌تر است. Main Thread با chunking کافی است |
 | **استفاده از useLiveQuery برای Reverse Index** | Reverse Index مشتق از داده است، نه داده اولیه. کش module-level با invalidation دستی |
+| **استفاده از Zustand / MobX / Redux برای state فیچر Temporal Boost** | Anti-Pattern مطلق پروژه. فقط Context + localStorage |
+| **moment-jalaali / jalaali-js / date-fns-jalali / dayjs-jalaali** | کتابخانه سنگین/غیرضروری. فقط `Intl.DateTimeFormat('fa-IR-u-ca-persian-nu-latn').formatToParts(new Date())` |
+| **ذخیره فهرست مناسبت‌ها در Dexie** | داده تنظیمات است نه داده تحلیلی. خط قرمز فاز ۲ هیچ جدول/ایندکس جدید. → `localStorage` با کلید `LINKMESH_OCCASIONS_v1::{projectId}` |
+| **Overwrite کردن `score` در رکوردهای `candidates` یا `results` Dexie توسط Temporal Boost** | داده خام باید دست‌نخورده بماند. Boost فقط in-memory و قبل از render اعمال می‌شود |
+| **اعمال Temporal Boost داخل scorer.ts یا Web Worker** | scorer بلک‌باکس است. Boost یک Service مجزا (Layer 3) است که بعد از اتمام scoring، روی نتیجه اعمال می‌شود |
+| **خواندن زمان از سرور یا API خارجی** | فیچر کاملاً client-side. زمان فقط از `new Date()` در مرورگر کاربر |
 
 ---
 
@@ -90,7 +105,8 @@
 - شکستن `useAnalysisQueue` خداگونه به هوک‌های هدفمند
 
 ### فاز ۲ — توسعه ویژگی‌ها (در حال انجام)
-- **F1 — Inlink Analytics (گراف معکوس):** نمایش لینک‌های ورودی به یک صفحه با منطق Hybrid (results به‌عنوان منبع طلایی، candidates به‌عنوان fallback) و Reverse Index in-memory برای جلوگیری از UI Freeze.
+- **F1 — Inlink Analytics (گراف معکوس):** نمایش لینک‌های ورودی به یک صفحه با منطق Hybrid (results به‌عنوان منبع طلایی، candidates به‌عنوان fallback) و Reverse Index in-memory برای جلوگیری از UI Freeze. ✅ تکمیل‌شده.
+- **F2 — Live / Temporal Boost:** ضریب‌دهی in-memory بر اساس تقویم شمسی فعلی، مناسبت‌های CSV، و فصل/ماه built-in. صرفاً Middleware روی خروجی scoring قبل از sort. کاملاً اختیاری و تاگل‌پذیر.
 
 ### فاز ۳ (آینده — اکنون لمس نشود)
 - کراولر خودکار
