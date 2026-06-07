@@ -18,14 +18,21 @@ import {
   ArrowRight, Brain, Info, Save, X, 
   ChevronUp, ChevronDown, ExternalLink,
   CheckCircle, BarChart2, Globe, Tag, Sparkles,
-  Calendar
+  Calendar, Pin
 } from 'lucide-react';
 import { useInlinkAnalytics } from '../hooks/useInlinkAnalytics';
 import InlinkBadge from '../components/InlinkBadge';
 import InlinkModal from '../components/InlinkModal';
 import * as inlinkGraphService from '../services/analysis/inlinkGraphService';
 import { useTemporalContext } from '../contexts/TemporalContext';
-import { applyTemporalBoost, sortByBoostedScore } from '../services/temporal/temporalService';
+import { useQuotaContext } from '../contexts/QuotaContext';
+import { getOrBuildAllocation } from '../services/quota/quotaAllocationService';
+import { buildFinalCandidateList } from '../services/pipeline/lensPipeline';
+import { QuotaAllocation } from '../services/quota/quotaService';
+import { applyTemporalBoost, sortByBoostedScore, buildLiveOrderedList, PIN_QUOTA } from '../services/temporal/temporalService';
+import TemporalBadge from '../components/TemporalBadge';
+import QuotaBadge from '../components/QuotaBadge';
+import { BarChart3 } from 'lucide-react';
 
 export default function PageDetail() {
   const { projectId, pageId } = useParams<{ projectId: string, pageId: string }>();
@@ -70,58 +77,74 @@ export default function PageDetail() {
     return () => window.removeEventListener('beforeunload', handleBeforeUnload);
   }, [isUnsaved]);
 
-  const allPages = useLiveQuery(() => pageRepository.listByProject(pId), [pId]);
-  const { isEnabledForPage, getAllActiveEvents, setPageEnabled } = useTemporalContext();
-
   const candidateList = candidateRec ? safeJsonParse(candidateRec.candidate_list, []) : [];
   const categories = page ? safeJsonParse(page.categories, {}) : {};
 
-  // ساخت نگاشت متادیتا برای کلمات کلیدی دسته‌بندی مقصد
-  const targetMetadata = useMemo(() => {
-    const map = new Map<number, { title: string; categoryValues: string[] }>();
-    if (!allPages) return map;
-    allPages.forEach(p => {
-      const cats = safeJsonParse(p.categories, {});
-      const values = Object.values(cats).filter(v => typeof v === 'string') as string[];
-      map.set(p.id!, {
-        title: p.title,
-        categoryValues: values
-      });
-    });
-    return map;
-  }, [allPages]);
+  const temporal = useTemporalContext();
+  const isTemporalActiveHere = temporal.isEnabledForPage(pgId);
 
-  // آماده‌سازی کاندیداهای پردازش‌شده زمانی و اعمال بونوس فصلی
-  const processedCandidateList = useMemo(() => {
-    if (!candidateList || candidateList.length === 0) return [];
-    if (!isEnabledForPage(pgId)) return candidateList;
+  const quotaCtx = useQuotaContext();
+  const isQuotaActiveHere = quotaCtx.isEnabledForPage(pgId);
 
-    const activeEvents = getAllActiveEvents();
-    const boosted = applyTemporalBoost(candidateList, {
-      events: activeEvents,
-      targetMetadata,
-      sourcePageTitle: page?.title || ''
+  const [allocation, setAllocation] = useState<QuotaAllocation | null>(null);
+  const [loadingAllocation, setLoadingAllocation] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    const loadAllocation = async () => {
+      if (!isQuotaActiveHere || quotaCtx.rows.length === 0) {
+        setAllocation(null);
+        return;
+      }
+      setLoadingAllocation(true);
+      try {
+        const alloc = await getOrBuildAllocation(pId, quotaCtx.getSettings());
+        if (active) {
+          setAllocation(alloc);
+        }
+      } catch (err) {
+        console.error("خطا در همگام‌سازی تخصیص سهمیه‌بندی:", err);
+      } finally {
+        if (active) {
+          setLoadingAllocation(false);
+        }
+      }
+    };
+
+    loadAllocation();
+    return () => {
+      active = false;
+    };
+  }, [pId, isQuotaActiveHere, quotaCtx.rows, quotaCtx.totalInternalLinks]);
+
+  // محاسبه لیست نهایی پیوندی کاندیداها با استفاده از پایپ‌لاین یکپارچه ترکیبی
+  const processedCandidates = useMemo(() => {
+    return buildFinalCandidateList({
+      candidates: candidateList,
+      sourcePageId: pgId,
+      temporal: isTemporalActiveHere ? {
+        events: temporal.getAllActiveEvents(),
+        targetMetadata: new Map()
+      } : undefined,
+      quota: isQuotaActiveHere && allocation ? {
+        allocation
+      } : undefined
     });
-    return sortByBoostedScore(boosted);
-  }, [candidateList, isEnabledForPage, pgId, getAllActiveEvents, targetMetadata, page?.title]);
+  }, [candidateList, pgId, isTemporalActiveHere, isQuotaActiveHere, temporal, allocation]);
 
   // نمایش ۳۰ کاندیدای برتر در حالت پیش‌فرض و نمایش بقیه با دکمه مشاهده بیشتر
-  const displayedCandidates = showAllCandidates ? processedCandidateList : processedCandidateList.slice(0, 30);
+  const displayedCandidates = showAllCandidates ? processedCandidates : processedCandidates.slice(0, 30);
 
   const handleAIAnalysis = async () => {
     setAnalyzing(true);
     try {
-      const isTemporalActive = isEnabledForPage(pgId);
-      const activeEvents = getAllActiveEvents();
-      
+      const temporalEvents = isTemporalActiveHere ? temporal.getAllActiveEvents() : undefined;
       const newLinks = await analysisService.runSinglePageAnalysis(
-        pId, 
-        pgId, 
+        pId,
+        pgId,
         'gemini-3.1-flash-lite',
-        {
-          enabled: isTemporalActive,
-          events: activeEvents
-        }
+        temporalEvents,
+        (isQuotaActiveHere && allocation) ? allocation : undefined
       );
       
       setSelectedLinks(newLinks);
@@ -203,17 +226,29 @@ export default function PageDetail() {
             </Link>
             <Badge variant="blue" className="px-3 py-1 bg-blue-50 text-blue-700 border-blue-100">SEO Workstation</Badge>
             <InlinkBadge count={inlink.count} loading={inlink.loading} onClick={() => setInlinkModalOpen(true)} />
-            <button
-              onClick={() => setPageEnabled(pgId, !isEnabledForPage(pgId))}
-              className={`px-2.5 py-1 text-xs font-bold rounded-lg border transition-all flex items-center gap-1.5 cursor-pointer hover:scale-105 shrink-0 ${
-                isEnabledForPage(pgId)
-                  ? 'bg-emerald-50 text-emerald-700 border-emerald-100'
-                  : 'bg-gray-50 text-gray-400 border-gray-100 hover:text-gray-650'
+            <button 
+              onClick={() => temporal.setPageEnabled(pgId, !isTemporalActiveHere)}
+              className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                isTemporalActiveHere 
+                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' 
+                  : 'bg-gray-50 text-gray-500 border border-gray-100 hover:bg-gray-100'
               }`}
-              title={isEnabledForPage(pgId) ? 'هوشمندسازی زمانی فعال است - برای غیرفعال‌سازی کلیک کنید' : 'هوشمندسازی زمانی غیرفعال است - برای فعال‌سازی کلیک کنید'}
+              title="فعال/غیرفعال‌سازی هوشمندسازی فصلی برای این صفحه"
             >
-              <Calendar size={13} className={isEnabledForPage(pgId) ? 'text-emerald-500' : 'text-gray-400'} />
-              <span>هوشمندسازی زمانی: {isEnabledForPage(pgId) ? 'فعال' : 'غیرفعال'}</span>
+              <Calendar size={12} />
+              <span>{isTemporalActiveHere ? 'Live: روشن' : 'Live: خاموش'}</span>
+            </button>
+            <button 
+              onClick={() => quotaCtx.setPageEnabled(pgId, !isQuotaActiveHere)}
+              className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-bold rounded-lg transition-all cursor-pointer ${
+                isQuotaActiveHere 
+                  ? 'bg-blue-50 text-blue-700 border border-blue-200' 
+                  : 'bg-gray-50 text-gray-500 border border-gray-100 hover:bg-gray-100'
+              }`}
+              title="فعال/غیرفعال‌سازی سهمیه‌بندی و وزن‌دهی ایمپرشن برای این صفحه"
+            >
+              <BarChart3 size={12} />
+              <span>{isQuotaActiveHere ? 'سهمیه: روشن' : 'سهمیه: خاموش'}</span>
             </button>
             {isUnsaved && (
               <span className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-bold rounded-lg bg-yellow-50 text-yellow-700 border border-yellow-100 animate-pulse">
@@ -374,7 +409,18 @@ export default function PageDetail() {
                     whileInView={{ opacity: 1, y: 0 }}
                     viewport={{ once: true }}
                     transition={{ delay: index * 0.02 }}
+                    className={`relative rounded-2xl transition-all ${
+                      isTemporalActiveHere && index < PIN_QUOTA 
+                        ? 'ring-2 ring-emerald-500/40 shadow-xs' 
+                        : ''
+                    }`}
                   >
+                    {isTemporalActiveHere && index < PIN_QUOTA && (
+                      <div className="absolute top-2 right-2 bg-emerald-500 text-white rounded-lg px-2 py-0.5 text-[9px] font-bold z-10 shadow-xs flex items-center gap-1 opacity-90">
+                        <Pin size={10} className="rotate-45" />
+                        <span>پین لایو</span>
+                      </div>
+                    )}
                     {/* ارسال اختیاری مقدار index برای رتبه‌دهی ترتیبی مطمئن */}
                     <CandidateCard 
                       candidate={c} 
@@ -382,19 +428,35 @@ export default function PageDetail() {
                       onToggle={() => toggleCandidate(c)}
                       index={index}
                     />
+                     <div className="absolute top-2.5 left-12 z-10 pointer-events-none flex items-center gap-1">
+                      {'temporalLabel' in c && c.temporalMultiplier !== 1 && (
+                        <TemporalBadge 
+                          multiplier={c.temporalMultiplier}
+                          label={c.temporalLabel}
+                          reason={c.temporalReason}
+                        />
+                      )}
+                      {'quotaLabel' in c && c.quotaLabel === 'within-quota' && (
+                        <QuotaBadge 
+                          quotaLabel={c.quotaLabel}
+                          quotaInfo={c.quotaInfo}
+                          impressionWeight={c.impressionWeight}
+                        />
+                      )}
+                    </div>
                   </motion.div>
                 ))}
              </div>
 
              {/* دکمه مشاهده بیشتر منطقی و استاندارد */}
-             {candidateList.length > 30 && !showAllCandidates && (
+             {processedCandidates.length > 30 && !showAllCandidates && (
                <div className="flex justify-center pt-6">
                  <Button
                    onClick={() => setShowAllCandidates(true)}
                    variant="secondary"
                    className="py-2.5 px-8 border border-blue-100 hover:border-blue-200 rounded-xl text-xs font-bold bg-white text-blue-600 hover:bg-blue-50/50 shadow-xs transition-all flex items-center gap-1.5"
                  >
-                   <span>مشاهده بیشتر ({candidateList.length - 30} مورد دیگر)</span>
+                   <span>مشاهده بیشتر ({processedCandidates.length - 30} مورد دیگر)</span>
                  </Button>
                </div>
              )}

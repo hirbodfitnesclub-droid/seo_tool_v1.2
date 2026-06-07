@@ -7,12 +7,21 @@ import * as queueRepository from '../../repositories/queueRepository';
 import * as pageRepository from '../../repositories/pageRepository';
 import * as QueueManager from './QueueManager';
 import { executePage } from './TaskExecutor';
+import { type TemporalEvent } from '../../services/temporal/temporalService';
+import { type QuotaAllocation } from '../../services/quota/quotaService';
 
 /**
  * ناظر و مجری پردازش متوالی صف پروژه‌ها
  * @param projectId شناسه عددی پروژه مورد نیاز تحلیل
+ * @param lensParams پارامترهای اختیاری عینک زمانی و سهمیه‌بندی مستقل از کامپوننت مرورگر
  */
-export async function runQueue(projectId: number): Promise<void> {
+export async function runQueue(
+  projectId: number,
+  lensParams?: {
+    temporalEvents?: TemporalEvent[];
+    quotaAllocation?: QuotaAllocation;
+  }
+): Promise<void> {
   const queue = await queueRepository.getByProject(projectId);
   if (!queue || queue.status === 'completed') return;
 
@@ -34,8 +43,8 @@ export async function runQueue(projectId: number): Promise<void> {
     const page = pages[i];
 
     try {
-      // اجرای گام تحلیل و خروج اتمیک
-      const executed = await executePage(projectId, page.id!, selectedModel, pages);
+      // اجرای گام تحلیل و خروج اتمیک همراه با لنزهای فعال
+      const executed = await executePage(projectId, page.id!, selectedModel, pages, lensParams);
       
       // جلو بردن شاخص پیشرفت ردیف در صف دیتابیس
       await QueueManager.advance(queue.id!, i + 1);

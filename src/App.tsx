@@ -12,15 +12,17 @@ import { ToastProvider } from './contexts/ToastContext';
 import { ToastContainer } from './components/ui/Toast';
 import { useQueueAutoResume } from './hooks/useQueueAutoResume';
 import { TemporalProvider } from './contexts/TemporalContext';
+import { QuotaProvider } from './contexts/QuotaContext';
 
 export default function App() {
   // اجرای پایش خودکار بازنشانی صف‌های ناتمام در زمان بالا آمدن تب
   useQueueAutoResume();
 
   return (
-    <TemporalProvider>
-      <ToastProvider>
-        <BrowserRouter>
+    <QuotaProvider>
+      <TemporalProvider>
+        <ToastProvider>
+          <BrowserRouter>
           <div className="min-h-screen flex flex-col">
           {/* Navigation Bar */}
           <header className="bg-white border-b border-gray-200 sticky top-0 z-50">
@@ -57,6 +59,7 @@ export default function App() {
       <ToastContainer />
     </ToastProvider>
     </TemporalProvider>
+    </QuotaProvider>
   );
 }
 

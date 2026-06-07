@@ -13,8 +13,8 @@ import { TemporalEvent } from './temporalService';
  */
 export function generateCsvTemplate(): string {
   const headers = "نام مناسبت,تاریخ شروع (شمسی),تاریخ پایان (شمسی),کلمات کلیدی";
-  const row1 = "شب یلدا,1404/09/30,1404/09/30,یلدا، شب چله، انار";
-  const row2 = "نوروز,1404/12/29,1405/01/13,نوروز، عید، تعطیلات بهاری";
+  const row1 = "شب یلدا,1404/09/30,1404/09/30,یلدا|شب چله|انار";
+  const row2 = "نوروز,1404/12/29,1405/01/13,نوروز|عید|تعطیلات بهاری";
   return `\uFEFF${headers}\n${row1}\n${row2}`;
 }
 
@@ -45,6 +45,7 @@ export function parseCsvFile(file: File): Promise<{ events: TemporalEvent[]; err
     Papa.parse(file, {
       header: true,
       skipEmptyLines: true,
+      transformHeader: (header) => header.replace(/^\uFEFF/, '').trim(),
       complete: (results) => {
         const errors: string[] = [];
         const events: TemporalEvent[] = [];
@@ -92,7 +93,7 @@ export function parseCsvFile(file: File): Promise<{ events: TemporalEvent[]; err
           }
 
           const keywords = valid['کلمات کلیدی']
-            .split(/[|،,\-]/)
+            .split(/[|،,\-]+/)
             .map(k => k.trim().toLowerCase())
             .filter(Boolean);
 

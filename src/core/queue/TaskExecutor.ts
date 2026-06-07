@@ -11,6 +11,9 @@ import { buildSinglePagePrompt } from '../../services/api/promptBuilder';
 import { safeJsonParse } from '../../utils/safeJson';
 import { type CandidateWithTags } from '../../core/scoring/scorer';
 import { type Page } from '../../db';
+import { buildFinalCandidateList } from '../../services/pipeline/lensPipeline';
+import { type TemporalEvent } from '../../services/temporal/temporalService';
+import { type QuotaAllocation } from '../../services/quota/quotaService';
 
 /**
  * اجرای تحلیل سئو و پیشنهاد لینک برای یک صفحه خاص با قابلیت بازگشت فیدبک موفقیت یا پرش (Skip)
@@ -18,13 +21,18 @@ import { type Page } from '../../db';
  * @param pageId شناسه عددی صفحه مبدأ جهت تحلیل
  * @param model مدل هوش مصنوعی انتخابی
  * @param allPages لیست تمام صفحات پروژه جهت رجوع و غنی‌سازی تگ‌ها
+ * @param lensParams پارامترهای موتور تقویت موقتی و سهمیه‌بندی سراسری
  * @returns پرامیس حاوی وضعیت موفقیت تحلیل صفحه (در صورت نبود کاندیدا پرش انجام شده و false برگردانده می‌شود)
  */
 export async function executePage(
   projectId: number,
   pageId: number,
   model: string,
-  allPages: Page[]
+  allPages: Page[],
+  lensParams?: {
+    temporalEvents?: TemporalEvent[];
+    quotaAllocation?: QuotaAllocation;
+  }
 ): Promise<boolean> {
   const page = await pageRepository.getById(pageId);
   if (!page) {
@@ -38,8 +46,22 @@ export async function executePage(
     return false;
   }
 
-  const candidateList: CandidateWithTags[] = safeJsonParse(candidateRecord.candidate_list, []);
-  const top30 = candidateList.slice(0, 30);
+  const candidateList: any[] = safeJsonParse(candidateRecord.candidate_list, []);
+
+  // فیلترینگ و رتبه‌بندی به کمک پایپ‌لاین ترکیبی یکپارچه قبل از غنی‌سازی اطلاعات
+  const processedCandidates = buildFinalCandidateList({
+    candidates: candidateList,
+    sourcePageId: pageId,
+    temporal: lensParams?.temporalEvents && lensParams.temporalEvents.length > 0 ? {
+      events: lensParams.temporalEvents,
+      targetMetadata: new Map()
+    } : undefined,
+    quota: lensParams?.quotaAllocation ? {
+      allocation: lensParams.quotaAllocation
+    } : undefined
+  });
+
+  const top30 = processedCandidates.slice(0, 30);
 
   // غنی‌سازی پویای کاندیداها با تگ‌های واقعی صفحات مقصد
   const enrichedCandidates = top30.map(cand => {
@@ -59,8 +81,21 @@ export async function executePage(
     return cand;
   });
 
+  // تولید مجدد کاندیداهای ورودی پرامپت‌ساز برای اطمینان کامل از هم‌ترازی نهایی ترتیب کاندیداها با خروجی هوش مصنوعی
+  const finalAiCandidates = buildFinalCandidateList({
+    candidates: enrichedCandidates,
+    sourcePageId: pageId,
+    temporal: lensParams?.temporalEvents && lensParams.temporalEvents.length > 0 ? {
+      events: lensParams.temporalEvents,
+      targetMetadata: new Map()
+    } : undefined,
+    quota: lensParams?.quotaAllocation ? {
+      allocation: lensParams.quotaAllocation
+    } : undefined
+  });
+
   // ب: ساخت پرامپت اختصاصی و فراخوانی مدل جمینای
-  const prompt = buildSinglePagePrompt({ title: page.title, categories: page.categories }, enrichedCandidates);
+  const prompt = buildSinglePagePrompt({ title: page.title, categories: page.categories }, finalAiCandidates as any);
   const response = await callGemini(prompt, model);
 
   // ج: ذخیره نتیجه آماده در جدول نتایج نهایی

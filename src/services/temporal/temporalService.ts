@@ -23,10 +23,11 @@ export interface BoostedCandidate {
   
   // فیلدهای بونوس فاز ۲:
   boostedScore: number;                 // امتیاز نهایی پس از اعمال ضریب زمانی (score * multiplier)
-  temporalMultiplier: 4 | 3 | 1 | 0.15; // مقدار ضریب اعمال شده (۴، ۳، ۱ یا ۰.۱۵)
+  temporalMultiplier: 4 | 3 | 1 | 0.15 | 0.001; // مقدار ضریب اعمال شده (۴، ۳، ۱، ۰.۱۵ یا ۰.۰۰۱)
   temporalLabel: TemporalLabel;         // برچسب دسته‌بندی زمانی
   temporalReason: string;               // توضیح فارسی دلیل اعمال ضریب (مثال: «پیش‌واز یلدا — ۴۵ روز مانده»)
   matchedEventName: string | null;      // نام مناسبتی که تطابق پیدا کرده است
+  temporalTargetMonth?: number;         // ماه هدف مناسبت برای فیلترینگ پساپردازش
 }
 
 /**
@@ -78,15 +79,46 @@ function extractKeywordsFromCandidate(
 }
 
 /**
+ * بررسی می‌کند که آیا یک عبارت (کلمه یا ترکیب کلمات) به صورت کامل و با رعایت مرز کلمه‌ها 
+ * در یک متن وجود دارد یا خیر.
+ */
+export function matchWithBoundary(text: string, phrase: string): boolean {
+  const idxs: number[] = [];
+  let pos = text.indexOf(phrase);
+  while (pos !== -1) {
+    idxs.push(pos);
+    pos = text.indexOf(phrase, pos + 1);
+  }
+
+  if (idxs.length === 0) return false;
+
+  const isWordChar = (char: string): boolean => {
+    if (!char) return false;
+    // حروف الفبای فارسی/عربی، حروف انگلیسی و اعداد
+    return /[a-zA-Z0-9\u0600-\u06FF\u0750-\u077F\uFB50-\uFDFF\uFE70-\uFEFF]/.test(char);
+  };
+
+  return idxs.some((idx) => {
+    const startBoundary = idx === 0 || !isWordChar(text[idx - 1]);
+    const endBoundary = (idx + phrase.length) === text.length || !isWordChar(text[idx + phrase.length]);
+    return startBoundary && endBoundary;
+  });
+}
+
+/**
  * بررسی انطباق کلمات کلیدی مناسبت با کلمات کلیدی کاندیدا
  */
 function matchEventToKeywords(event: TemporalEvent, keywords: string[]): boolean {
-  return event.keywords.some((kw) => {
+  const validKeywords = (keywords || []).filter(Boolean);
+  const validEventKeywords = (event.keywords || []).filter(Boolean);
+
+  return validEventKeywords.some((kw) => {
     const normalizedKw = normalizeString(kw);
     if (!normalizedKw) return false;
-    return keywords.some((k) => {
+    return validKeywords.some((k) => {
       const normalizedK = normalizeString(k);
-      return normalizedK.includes(normalizedKw) || normalizedKw.includes(normalizedK);
+      if (!normalizedK) return false;
+      return matchWithBoundary(normalizedK, normalizedKw);
     });
   });
 }
@@ -152,7 +184,7 @@ function projectEventToCurrentYear(event: TemporalEvent, today: JalaliDate): Tem
 function classifyEventTiming(
   event: TemporalEvent,
   today: JalaliDate
-): { label: TemporalLabel; multiplier: 4 | 3 | 1 | 0.15; reason: string } | null {
+): { label: TemporalLabel; multiplier: 4 | 3 | 1 | 0.15 | 0.001; reason: string } | null {
   if (isJalaliInRange(today, event.startDate, event.endDate)) {
     return {
       label: 'current',
@@ -162,7 +194,7 @@ function classifyEventTiming(
   }
 
   const daysToStart = jalaliDaysBetween(today, event.startDate);
-  if (daysToStart >= 30 && daysToStart <= 60) {
+  if (daysToStart > 0 && daysToStart <= 60) {
     return {
       label: 'pre',
       multiplier: 4,
@@ -178,16 +210,20 @@ function classifyEventTiming(
  */
 function detectOutOfSeason(keywords: string[], today: JalaliDate): string | null {
   const seasons = [
-    { name: 'بهار', start: { year: 1400, month: 1, day: 1 }, end: { year: 1400, month: 3, day: 31 } },
-    { name: 'تابستان', start: { year: 1400, month: 4, day: 1 }, end: { year: 1400, month: 6, day: 31 } },
-    { name: 'پاییز', start: { year: 1400, month: 7, day: 1 }, end: { year: 1400, month: 9, day: 30 } },
-    { name: 'زمستان', start: { year: 1400, month: 10, day: 1 }, end: { year: 1400, month: 12, day: 29 } },
+    { name: 'بهار', start: { year: today.year, month: 1, day: 1 }, end: { year: today.year, month: 3, day: 31 } },
+    { name: 'تابستان', start: { year: today.year, month: 4, day: 1 }, end: { year: today.year, month: 6, day: 31 } },
+    { name: 'پاییز', start: { year: today.year, month: 7, day: 1 }, end: { year: today.year, month: 9, day: 30 } },
+    { name: 'زمستان', start: { year: today.year, month: 10, day: 1 }, end: { year: today.year, month: 12, day: 29 } },
   ];
 
   for (const season of seasons) {
     const isCurrent = isJalaliInRange(today, season.start, season.end);
     if (!isCurrent) {
-      const hasKeyword = keywords.some((k) => k.includes(season.name));
+      const hasKeyword = keywords.some((k) => {
+        const normalizedK = normalizeString(k);
+        const normalizedSeasonName = normalizeString(season.name);
+        return matchWithBoundary(normalizedK, normalizedSeasonName);
+      });
       if (hasKeyword) {
         return season.name;
       }
@@ -198,7 +234,67 @@ function detectOutOfSeason(keywords: string[], today: JalaliDate): string | null
 }
 
 /**
- * تابع اصلی افزایش رتبه‌ی زمانی (Temporal Boost Middleware) به همراه سهمیه‌بندی هوشمند رویدادها
+ * بررسی دوره‌ای و فصلی بودن کاندیدا بر اساس رویدادهای تعریف شده
+ */
+export function isCandidateSeasonal(
+  keywords: string[],
+  events: TemporalEvent[],
+  today: JalaliDate
+): {
+  hasActiveOrUpcoming: boolean;
+  hasExpiredOrFar: boolean;
+  bestMatch: {
+    label: TemporalLabel;
+    multiplier: 4 | 3 | 1 | 0.15 | 0.001;
+    reason: string;
+    eventName: string;
+    startMonth?: number;
+  } | null;
+  expiredEventNames: string[];
+} {
+  let bestMatch: {
+    label: TemporalLabel;
+    multiplier: 4 | 3 | 1 | 0.15 | 0.001;
+    reason: string;
+    eventName: string;
+    startMonth?: number;
+  } | null = null;
+  let hasActiveOrUpcoming = false;
+  let hasExpiredOrFar = false;
+  const expiredEventNames: string[] = [];
+
+  for (const event of events) {
+    if (!matchEventToKeywords(event, keywords)) continue;
+    const projected = projectEventToCurrentYear(event, today);
+    const classification = classifyEventTiming(projected, today);
+
+    if (classification) {
+      hasActiveOrUpcoming = true;
+      if (!bestMatch || classification.multiplier > bestMatch.multiplier) {
+        bestMatch = {
+          ...classification,
+          eventName: event.name,
+          startMonth: projected.startDate.month,
+        };
+      }
+    } else {
+      hasExpiredOrFar = true;
+      if (!expiredEventNames.includes(event.name)) {
+        expiredEventNames.push(event.name);
+      }
+    }
+  }
+
+  return {
+    hasActiveOrUpcoming,
+    hasExpiredOrFar,
+    bestMatch,
+    expiredEventNames,
+  };
+}
+
+/**
+ * تابع اصلی افزایش رتبه‌ی زمانی (Temporal Boost Middleware)
  */
 export function applyTemporalBoost(
   candidates: any[],
@@ -206,75 +302,54 @@ export function applyTemporalBoost(
     events: TemporalEvent[];
     today?: JalaliDate;
     targetMetadata?: Map<number, { title: string; categoryValues: string[] }>;
-    sourcePageTitle?: string;
   }
 ): BoostedCandidate[] {
   const today = options.today ?? getCurrentJalaliDate();
   const events = options.events || [];
   const targetMetadata = options.targetMetadata;
-  const sourceTitle = options.sourcePageTitle || '';
 
-  // تشخیص زماندار بودن صفحه مبدأ بر اساس کلمات کلیدی تمام رویدادها
-  let isSeasonal = false;
-  if (sourceTitle) {
-    const normalizedSourceTitle = normalizeString(sourceTitle);
-    isSeasonal = events.some((event) => {
-      return event.keywords.some((kw) => {
-        const normalizedKw = normalizeString(kw);
-        if (!normalizedKw) return false;
-        return normalizedSourceTitle.includes(normalizedKw) || normalizedKw.includes(normalizedSourceTitle);
-      });
-    });
-  }
-
-  // سهمیه‌بندی: ۵ لینک اگر صفحه مبدأ خود زمان‌دار باشد، در غیر این‌صورت ۳ لینک
-  const quota = isSeasonal ? 5 : 3;
-
-  const allProcessed = candidates.map((c): BoostedCandidate => {
+  const boostedCandidates = candidates.map((c) => {
     const keywords = extractKeywordsFromCandidate(c, targetMetadata);
-
-    let bestMatch: {
-      label: TemporalLabel;
-      multiplier: 4 | 3 | 1 | 0.15;
-      reason: string;
-      eventName: string;
-    } | null = null;
-
-    for (const event of events) {
-      if (!matchEventToKeywords(event, keywords)) continue;
-      const projected = projectEventToCurrentYear(event, today);
-      const classification = classifyEventTiming(projected, today);
-      if (!classification) continue;
-
-      // اولویت بالا به ضریب بزرگتر (پیش‌واز ۴ بر جاری ۳ ارجح است)
-      if (!bestMatch || classification.multiplier > bestMatch.multiplier) {
-        bestMatch = {
-          ...classification,
-          eventName: event.name,
-        };
-      }
-    }
-
     const score = typeof c.score === 'number' ? c.score : 0;
     const matchedTagsArray = c.matched_tags || c.matchedTags || [];
 
-    if (bestMatch) {
+    const result = isCandidateSeasonal(keywords, events, today);
+
+    if (result.hasActiveOrUpcoming && result.bestMatch) {
       return {
+        ...c,
         page_id: c.page_id,
         title: c.title,
         score: score,
         matched_tags: matchedTagsArray,
-        boostedScore: score * bestMatch.multiplier,
-        temporalMultiplier: bestMatch.multiplier,
-        temporalLabel: bestMatch.label,
-        temporalReason: bestMatch.reason,
-        matchedEventName: bestMatch.eventName,
+        boostedScore: score * result.bestMatch.multiplier,
+        temporalMultiplier: result.bestMatch.multiplier as any,
+        temporalLabel: result.bestMatch.label,
+        temporalReason: result.bestMatch.reason,
+        matchedEventName: result.bestMatch.eventName,
+        temporalTargetMonth: result.bestMatch.startMonth,
+      };
+    }
+
+    if (!result.hasActiveOrUpcoming && result.hasExpiredOrFar) {
+      return {
+        ...c,
+        page_id: c.page_id,
+        title: c.title,
+        score: score,
+        matched_tags: matchedTagsArray,
+        boostedScore: score * 0.001,
+        temporalMultiplier: 0.001,
+        temporalLabel: 'out-of-season',
+        temporalReason: `منقضی‌شده/خیلی دور: ${result.expiredEventNames.join('، ')}`,
+        matchedEventName: null,
       };
     }
 
     const outOfSeasonReason = detectOutOfSeason(keywords, today);
     if (outOfSeasonReason) {
       return {
+        ...c,
         page_id: c.page_id,
         title: c.title,
         score: score,
@@ -288,6 +363,7 @@ export function applyTemporalBoost(
     }
 
     return {
+      ...c,
       page_id: c.page_id,
       title: c.title,
       score: score,
@@ -300,34 +376,112 @@ export function applyTemporalBoost(
     };
   });
 
-  // تفکیک کاندیداهای دارای ضریب افزایشی (بونوس مثبت) جهت سهمیه‌بندی
-  const positiveBoosted = allProcessed.filter(item => item.temporalMultiplier !== undefined && item.temporalMultiplier > 1);
-  const others = allProcessed.filter(item => !(item.temporalMultiplier !== undefined && item.temporalMultiplier > 1));
-
-  // مرتب‌سازی کاندیداهای بوست‌شده بر اساس امتیاز جدید نزولی
-  positiveBoosted.sort((a, b) => b.boostedScore - a.boostedScore);
-
-  // نگه داشتن ردیف‌های برتر تا سقف سهمیه و خنثی کردن اضافه بار فصلی
-  const topPositiveBoosted = positiveBoosted.slice(0, quota);
-  const restPositiveBoosted = positiveBoosted.slice(quota).map(item => ({
-    ...item,
-    boostedScore: item.score,
-    temporalMultiplier: 1 as const,
-    temporalLabel: 'neutral' as TemporalLabel,
-    temporalReason: '',
-    matchedEventName: null
-  }));
-
-  const combined = [...topPositiveBoosted, ...restPositiveBoosted, ...others];
-
-  // مرتب‌سازی نهایی و خروجی یکپارچه دست‌نخورده
-  return sortByBoostedScore(combined);
+  return applyDynamicAllowedWindow(boostedCandidates, today);
 }
 
 /**
- * مرتب‌سازی کاندیداها بر اساس امتیاز بوست‌شده به‌صورت نزولی (به‌صورت immutable)
+ * اعمال پنجره زمانی مجاز و پویا بر اساس ماه جاری تقویم شمسی
+ */
+export function applyDynamicAllowedWindow(
+  candidates: BoostedCandidate[],
+  today: JalaliDate
+): BoostedCandidate[] {
+  const currentMonth = today.month;
+  const nextMonth = (currentMonth % 12) + 1;
+
+  // محاسبه ماه‌های فصل جاری
+  let seasonMonths: number[] = [];
+  if (currentMonth >= 1 && currentMonth <= 3) {
+    seasonMonths = [1, 2, 3];
+  } else if (currentMonth >= 4 && currentMonth <= 6) {
+    seasonMonths = [4, 5, 6];
+  } else if (currentMonth >= 7 && currentMonth <= 9) {
+    seasonMonths = [7, 8, 9];
+  } else {
+    seasonMonths = [10, 11, 12];
+  }
+
+  // ماه‌های مجاز شامل ماه جاری، ماه بعدی و فصل جاری
+  const allowedSet = new Set<number>([currentMonth, nextMonth, ...seasonMonths]);
+  const allowedMonths = Array.from(allowedSet);
+
+  // تشخیص فصل بعد ژنریک اگر ماه جاری آخرین ماه فصل باشد
+  let nextSeasonName = '';
+  if (currentMonth === 3) {
+    nextSeasonName = 'تابستان';
+  } else if (currentMonth === 6) {
+    nextSeasonName = 'پاییز';
+  } else if (currentMonth === 9) {
+    nextSeasonName = 'زمستان';
+  } else if (currentMonth === 12) {
+    nextSeasonName = 'بهار';
+  }
+
+  return candidates.map((c) => {
+    // استثنای حق‌تقدم: رویداد با وضعیت current هرگز تحت تاثیر پنجره خنثی نمی‌شود
+    if (c.temporalLabel === 'current') {
+      return c;
+    }
+
+    // اگر کاندیدا برانگیخته (بوست) شده ولی متعلق به ماه غیرمجاز است، امتیاز آن خنثی می‌شود
+    if (
+      c.temporalMultiplier > 1 &&
+      c.temporalTargetMonth !== undefined &&
+      !allowedMonths.includes(c.temporalTargetMonth)
+    ) {
+      // بررسی استثنای فصل بعد ژنریک
+      if (nextSeasonName) {
+        const candidateKeywords = extractKeywordsFromCandidate(c);
+        const matchesNextSeasonGeneric = candidateKeywords.some((kw) => {
+          const normalizedKw = normalizeString(kw);
+          const normalizedNextSeasonName = normalizeString(nextSeasonName);
+          return matchWithBoundary(normalizedKw, normalizedNextSeasonName);
+        });
+        if (matchesNextSeasonGeneric) {
+          return c; // معاف از خنثی‌سازی
+        }
+      }
+
+      return {
+        ...c,
+        boostedScore: c.score,
+        temporalMultiplier: 1,
+        temporalLabel: 'neutral',
+        temporalReason: `خنثی‌شده (خارج از پنجره زمانی مجاز - ماه هدف: ${c.temporalTargetMonth})`,
+      };
+    }
+    return c;
+  });
+}
+
+/**
+ * مرتب‌سازی کاندیداها بر اساس ضریب زمانی نزولی و سپس امتیاز بوست‌شده به‌صورت نزولی (اکید و قطعی - قانون ۵)
  */
 export function sortByBoostedScore(boosted: BoostedCandidate[]): BoostedCandidate[] {
-  return [...boosted].sort((a, b) => b.boostedScore - a.boostedScore);
+  return [...boosted].sort((a, b) => {
+    const multA = a.temporalMultiplier ?? 1;
+    const multB = b.temporalMultiplier ?? 1;
+    if (multB !== multA) {
+      return multB - multA;
+    }
+    return b.boostedScore - a.boostedScore;
+  });
+}
+
+export const PIN_QUOTA = 4;
+
+/**
+ * ارکستراتور تک‌مرجع (قانون ۱ و ۵) جهت تطابق ۱۰۰٪ ترتیب در UI و AI
+ */
+export function buildLiveOrderedList(
+  candidates: any[],
+  options: {
+    events: TemporalEvent[];
+    today?: JalaliDate;
+    targetMetadata?: Map<number, { title: string; categoryValues: string[] }>;
+  }
+): BoostedCandidate[] {
+  const boosted = applyTemporalBoost(candidates, options);
+  return sortByBoostedScore(boosted);
 }
 

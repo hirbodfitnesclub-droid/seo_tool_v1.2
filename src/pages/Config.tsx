@@ -7,9 +7,14 @@ import { Button } from '../components/ui/Button';
 import { Spinner } from '../components/ui/Spinner';
 import Breadcrumb from '../components/Breadcrumb';
 import { useToast } from '../hooks/useToast';
-import { Settings, Sliders, Zap, LayoutDashboard, Calendar, Upload, Download, Trash2 } from 'lucide-react';
+import { Settings, Sliders, Zap, LayoutDashboard, Calendar, Upload, Download, Trash2, BarChart3, AlertTriangle } from 'lucide-react';
 import { useTemporalContext } from '../contexts/TemporalContext';
 import { triggerDownloadTemplate, parseCsvFile } from '../services/temporal/temporalCsvService';
+import { useQuotaContext } from '../contexts/QuotaContext';
+import { triggerDownloadTemplate as triggerQuotaDownload, parseCsvFile as parseQuotaCsv } from '../services/quota/quotaCsvService';
+import { getOrBuildAllocation } from '../services/quota/quotaAllocationService';
+import ConfirmDialog from '../components/ConfirmDialog';
+import Modal from '../components/ui/Modal';
 
 export default function Config() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -18,11 +23,39 @@ export default function Config() {
   const { showToast } = useToast();
   const temporal = useTemporalContext();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const quotaCtx = useQuotaContext();
+  const quotaFileInputRef = useRef<HTMLInputElement>(null);
 
   const [scoringMode, setScoringMode] = useState<'linear' | 'weighted'>('linear');
   const [localWeights, setLocalWeights] = useState<Record<string, number>>({});
   const [maxLinks, setMaxLinks] = useState(10);
   const [saving, setSaving] = useState(false);
+
+  const [unmatchedTitles, setUnmatchedTitles] = useState<string[]>([]);
+  const [isUnmatchedModalOpen, setIsUnmatchedModalOpen] = useState(false);
+  const [isConfirmResetOpen, setIsConfirmResetOpen] = useState(false);
+
+  useEffect(() => {
+    if (!projectId) return;
+    const id = parseInt(projectId);
+    if (quotaCtx.rows.length === 0) {
+      setUnmatchedTitles([]);
+      return;
+    }
+    let active = true;
+    getOrBuildAllocation(id, quotaCtx.getSettings())
+      .then((allocation) => {
+        if (active) {
+          setUnmatchedTitles(allocation.unmatchedTitles || []);
+        }
+      })
+      .catch((err) => {
+        console.error("Error loading allocation for unmatched check:", err);
+      });
+    return () => {
+      active = false;
+    };
+  }, [projectId, quotaCtx.rows, quotaCtx.totalInternalLinks]);
 
   useEffect(() => {
     if (project) {
@@ -320,6 +353,167 @@ export default function Config() {
             )}
           </section>
 
+          {/* سهمیه سراسری و مدیریت ایمپرشن‌ها */}
+          <section className="bg-white rounded-2xl shadow-xs border border-gray-100 p-6 space-y-4">
+            <div className="flex justify-between items-center pb-2 border-b border-gray-100">
+              <h2 className="text-sm font-bold flex items-center gap-2 text-gray-800">
+                <BarChart3 size={16} className="text-blue-500" />
+                <span>سهمیه سراسری و اولویت ایمپرشن</span>
+              </h2>
+              {/* دکمه تغییر وضعیت (Toggle Button) سوییچ سراسری */}
+              <button 
+                type="button"
+                onClick={() => quotaCtx.setGlobalEnabled(!quotaCtx.globalEnabled)}
+                className={`relative w-11 h-6 rounded-full transition-colors duration-200 cursor-pointer focus:outline-hidden ${quotaCtx.globalEnabled ? 'bg-blue-600' : 'bg-gray-200'}`}
+              >
+                <span className={`absolute top-0.5 ${quotaCtx.globalEnabled ? 'right-0.5' : 'right-5'} w-5 h-5 bg-white rounded-full shadow transition-all duration-200`} />
+              </button>
+            </div>
+
+            <p className="text-xs text-gray-500 leading-relaxed">
+              با فعال‌سازی این بخش، با تنظیم درصد سهمیه و ایمپرشن برای صفحات مَپ شده از تکرار بیش از حد لینکدهی به صفحات خاص جلوگیری شده و اولویت‌دهی هوشمند ایمپرشن اعمال می‌شود.
+            </p>
+
+            {/* ورودی تعداد کل لینکها */}
+            <div className="space-y-1.5">
+              <label className="block text-xs font-bold text-gray-700">تعداد کل لینک‌های داخلی پیشنهادی سایت:</label>
+              <input 
+                type="number"
+                min="0"
+                value={quotaCtx.totalInternalLinks === 0 ? '' : quotaCtx.totalInternalLinks}
+                onChange={(e) => {
+                  const val = Number(e.target.value);
+                  quotaCtx.setTotalInternalLinks(isNaN(val) ? 0 : val);
+                }}
+                placeholder="مثال: ۳۰۰۰"
+                className="w-full px-4 py-2 text-xs font-mono font-bold rounded-xl border border-gray-200 outline-hidden focus:ring-2 focus:ring-blue-500/10 focus:border-blue-500"
+              />
+            </div>
+
+            {/* دانلود تمپلیت و آپلود فایل CSV سهمیه */}
+            <div className="grid grid-cols-2 gap-2.5 pt-2">
+              <button
+                type="button"
+                onClick={triggerQuotaDownload}
+                className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-lg bg-gray-50 hover:bg-gray-100 border border-gray-200/60 text-gray-700 text-xs font-bold transition-all cursor-pointer focus:outline-hidden"
+              >
+                <Download size={14} className="text-gray-500" />
+                <span>دانلود تمپلیت</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => quotaFileInputRef.current?.click()}
+                className="flex items-center justify-center gap-1.5 py-2.5 px-3 rounded-lg bg-blue-50 hover:bg-blue-100/80 border border-blue-200/60 text-blue-700 text-xs font-bold transition-all cursor-pointer focus:outline-hidden"
+              >
+                <Upload size={14} />
+                <span>آپلود فایل CSV</span>
+              </button>
+              
+              <input 
+                type="file" 
+                ref={quotaFileInputRef} 
+                onChange={async (e) => {
+                  const file = e.target.files?.[0];
+                  if (!file) return;
+                  try {
+                    const { rows, errors } = await parseQuotaCsv(file);
+                    if (errors.length > 0) {
+                      showToast({ 
+                        type: 'error', 
+                        message: `خطا در ${errors.length} ردیف اطلاعات. لطفاً فرمت فایل را با تمپلیت دانلود شده بازبینی کنید.` 
+                      });
+                    }
+                    if (rows.length > 0) {
+                      quotaCtx.setRows(rows);
+                      showToast({ 
+                        type: 'success', 
+                        message: `${rows.length} ردیف اطلاعات سهمیه‌بندی با موفقیت بارگذاری شد.` 
+                      });
+                    }
+                  } catch (err) {
+                    console.error(err);
+                    showToast({ type: 'error', message: 'خطا در خواندن و پارس فایل CSV سهمیه.' });
+                  } finally {
+                    e.target.value = '';
+                  }
+                }} 
+                accept=".csv" 
+                className="hidden" 
+              />
+            </div>
+
+            {/* جدول پیش‌نمایش ردیف‌ها */}
+            {quotaCtx.rows.length > 0 && (
+              <div className="space-y-2 pt-2 animate-in fade-in duration-300">
+                <div className="flex justify-between items-center text-xs">
+                  <span className="font-bold text-gray-700">لیست سهمیه‌ها ({quotaCtx.rows.length})</span>
+                  <button
+                    onClick={() => setIsConfirmResetOpen(true)}
+                    className="flex items-center gap-1 text-[10px] text-rose-600 hover:text-rose-700 font-bold transition-all cursor-pointer focus:outline-hidden"
+                  >
+                    <Trash2 size={12} />
+                    <span>حذف همه</span>
+                  </button>
+                </div>
+
+                <div className="border border-gray-100 rounded-xl overflow-hidden max-h-48 overflow-y-auto">
+                  <table className="w-full text-right text-[10px] border-collapse">
+                    <thead className="bg-gray-50 text-gray-600 border-b border-gray-100 sticky top-0">
+                      <tr>
+                        <th className="p-2 font-bold">عنوان صفحه (H1)</th>
+                        <th className="p-2 font-bold">ایمپرشن</th>
+                        <th className="p-2 font-bold">درصد</th>
+                        <th className="p-2 font-bold text-center">سهمیه مجاز</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-gray-50 bg-white">
+                      {quotaCtx.rows.slice(0, 25).map((row, idx) => {
+                        const calculatedQuota = Math.max(0, Math.round((row.percentage / 100) * quotaCtx.totalInternalLinks));
+                        return (
+                          <tr key={idx} className="hover:bg-gray-50/50 transition-all">
+                            <td className="p-2 truncate max-w-[120px]" title={row.title}>
+                              <div className="font-bold text-gray-850">{row.title}</div>
+                              {row.url && <div className="text-[9px] text-gray-400 mt-0.5 truncate dir-ltr text-right">{row.url}</div>}
+                            </td>
+                            <td className="p-2 text-gray-400 font-mono">{row.impressions.toLocaleString('fa-IR')}</td>
+                            <td className="p-2 text-gray-400 font-mono">{row.percentage}٪</td>
+                            <td className="p-2 font-mono text-center font-bold text-blue-600">{calculatedQuota}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+                {quotaCtx.rows.length > 25 && (
+                  <div className="text-center text-[10px] text-gray-400 font-bold pt-1">
+                    نمایش ۲۵ ردیف اول از {quotaCtx.rows.length} ردیف بارگذاری شده
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* گزارش عدم تطبیق عنوان‌ها */}
+            {unmatchedTitles.length > 0 && (
+              <div className="p-3 bg-amber-50 border border-amber-100 rounded-xl text-amber-800 text-xs space-y-2 animate-in fade-in duration-300">
+                <div className="font-semibold flex items-center gap-1.5">
+                  <AlertTriangle size={14} className="text-amber-500" />
+                  <span>تعداد {unmatchedTitles.length} عنوان هماهنگ نشده:</span>
+                </div>
+                <p className="text-[10px] text-amber-700 leading-relaxed">
+                  تعداد {unmatchedTitles.length} عنوان از فایل CSV با هیچ‌یک از صفحات پروژه مطابقت ندارند (دقت کنید عنوان‌ها باید با H1 صفحات در دیتابیس یکسان باشند).
+                </p>
+                <button
+                  type="button"
+                  onClick={() => setIsUnmatchedModalOpen(true)}
+                  className="font-bold text-blue-600 hover:text-blue-700 hover:underline transition-colors focus:outline-hidden inline-flex items-center text-[10px] cursor-pointer"
+                >
+                  مشاهده لیست عنوان‌های هماهنگ نشده ({unmatchedTitles.length})
+                </button>
+              </div>
+            )}
+          </section>
+
           <Button 
             className="w-full py-3.5 rounded-xl shadow-xs bg-emerald-600 hover:bg-emerald-700 font-bold text-sm cursor-pointer" 
             onClick={handleStartAnalysis}
@@ -331,6 +525,47 @@ export default function Config() {
         </div>
 
       </div>
+
+      <ConfirmDialog
+        isOpen={isConfirmResetOpen}
+        title="حذف سهمیه‌بندی‌ها"
+        message="آیا از حذف تمامی اطلاعات سهمیه‌بندی و اولویت ایمپرشن آپلود شده اطمینان دارید؟ با این کار تخصیص‌های سراسری غیرفعال خواهند شد."
+        confirmText="بله، حذف شود"
+        cancelText="انصراف"
+        confirmType="danger"
+        onConfirm={() => {
+          quotaCtx.setRows([]);
+          setIsConfirmResetOpen(false);
+          showToast({ type: 'success', message: 'تمام اطلاعات سهمیه‌بندی با موفقیت حذف شدند.' });
+        }}
+        onCancel={() => setIsConfirmResetOpen(false)}
+      />
+
+      <Modal
+        isOpen={isUnmatchedModalOpen}
+        title="عناوین تطبیق داده نشده"
+        onClose={() => setIsUnmatchedModalOpen(false)}
+        size="md"
+      >
+        <div className="space-y-4 font-sans">
+          <p className="text-xs text-gray-500 leading-relaxed pb-2 border-b border-gray-100 font-sans">
+            عناوین زیر در فایل CSV وجود دارند اما صفحه معادلی با این عنوان (H1) دقیق در دیتابیس پیدا نشد. برای تصحیح، باید عنوان فایل متنی با عنوان صفحه در لینک‌مش کاملا یکسان باشد (بدون در نظر گرفتن نیم‌فاصله یا فاصله‌های اضافه).
+          </p>
+          <div className="max-h-60 overflow-y-auto divide-y divide-gray-100 font-sans">
+            {unmatchedTitles.map((title, idx) => (
+              <div key={idx} className="py-2 text-xs text-gray-700 font-medium">
+                {title}
+              </div>
+            ))}
+          </div>
+          <div className="pt-2 text-[11px] font-sans">
+            <Button size="sm" onClick={() => setIsUnmatchedModalOpen(false)} className="cursor-pointer">
+              بستن پنجره
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
     </div>
   );
 }

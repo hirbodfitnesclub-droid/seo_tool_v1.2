@@ -14,7 +14,10 @@ import { computeAndStoreCandidates } from '../../utils/candidateStorage';
 import { buildSinglePagePrompt } from '../api/promptBuilder';
 import { callGemini } from '../api/geminiClient';
 import { safeJsonParse } from '../../utils/safeJson';
-import { applyTemporalBoost, sortByBoostedScore } from '../temporal/temporalService';
+import { buildLiveOrderedList, TemporalEvent } from '../temporal/temporalService';
+import { buildFinalCandidateList } from '../pipeline/lensPipeline';
+import { QuotaAllocation } from '../quota/quotaService';
+import { invalidateProject as invalidateProjectQuota } from '../quota/quotaAllocationService';
 
 /**
  * شروع فرآیند تحلیل کل صفحات یک پروژه
@@ -73,24 +76,22 @@ export async function startProjectAnalysis(
 
   // ابطال کش پس از اتمام/شروع مجدد یا تخصیص صف جدید تحلیل در پروژه
   inlinkGraphService.invalidateProject(projectId);
+  invalidateProjectQuota(projectId);
 }
 
 /**
- * شبیه‌سازی و بررسی تحلیل هوشمند برای تک صفحه منحصربه‌فرد بر اساس ۳۰ کاندیدای برتر و بهبود یافته فصلی
+ * شبیه‌سازی و بررسی تحلیل هوشمند برای تک صفحه منحصربه‌فرد بر اساس ۳۰ کاندیدای برتر
  * @param projectId شناسه عددی پروژه
  * @param pageId شناسه عددی صفحه مبدأ
  * @param model مدل انتخابی هوش مصنوعی
- * @param temporalOptions اختیاری: تنظیمات کانتکست فعال‌سازی و رویدادهای زمانی فصلی
  * @returns لیست لینک‌های پیشنهادی هوش مصنوعی
  */
 export async function runSinglePageAnalysis(
   projectId: number,
   pageId: number,
   model: string,
-  temporalOptions?: {
-    enabled: boolean;
-    events: any[];
-  }
+  temporalEvents?: TemporalEvent[],
+  quotaAllocation?: QuotaAllocation
 ): Promise<any[]> {
   const page = await pageRepository.getById(pageId);
   if (!page) {
@@ -99,28 +100,18 @@ export async function runSinglePageAnalysis(
 
   const candidateRec = await candidateRepository.getByPage(pageId);
   const candidateList = candidateRec ? safeJsonParse(candidateRec.candidate_list, []) : [];
-
-  // بررسی بونوس‌های زمانی و فصلی برای هوشمندسازی خروجی
-  let processedCandidates = candidateList;
-  if (temporalOptions?.enabled && temporalOptions.events && temporalOptions.events.length > 0) {
-    const allPages = await pageRepository.listByProject(projectId);
-    const targetMetadata = new Map<number, { title: string; categoryValues: string[] }>();
-    allPages.forEach(p => {
-      const cats = safeJsonParse(p.categories, {});
-      const values = Object.values(cats).filter(v => typeof v === 'string') as string[];
-      targetMetadata.set(p.id!, {
-        title: p.title,
-        categoryValues: values
-      });
-    });
-
-    const boosted = applyTemporalBoost(candidateList, {
-      events: temporalOptions.events,
-      targetMetadata,
-      sourcePageTitle: page.title
-    });
-    processedCandidates = sortByBoostedScore(boosted);
-  }
+  
+  const processedCandidates = buildFinalCandidateList({
+    candidates: candidateList,
+    sourcePageId: pageId,
+    temporal: temporalEvents && temporalEvents.length > 0 ? {
+      events: temporalEvents,
+      targetMetadata: new Map()
+    } : undefined,
+    quota: quotaAllocation ? {
+      allocation: quotaAllocation
+    } : undefined
+  });
 
   const top30 = processedCandidates.slice(0, 30);
 
@@ -144,9 +135,22 @@ export async function runSinglePageAnalysis(
     })
   );
 
+  // اعمال لوله فیلترینگ و مرتب‌سازی زنده به داده‌های ورودی جمینای در صورت فعال بودن لایو یا سهمیه
+  const finalAiCandidates = buildFinalCandidateList({
+    candidates: enrichedCandidates,
+    sourcePageId: pageId,
+    temporal: temporalEvents && temporalEvents.length > 0 ? {
+      events: temporalEvents,
+      targetMetadata: new Map()
+    } : undefined,
+    quota: quotaAllocation ? {
+      allocation: quotaAllocation
+    } : undefined
+  });
+
   const prompt = buildSinglePagePrompt(
     { title: page.title, categories: page.categories },
-    enrichedCandidates
+    finalAiCandidates as any
   );
 
   const response = await callGemini(prompt, model);

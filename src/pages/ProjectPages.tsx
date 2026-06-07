@@ -23,6 +23,9 @@ import {
   Search, Brain, BarChart2, Settings, ChevronLeft, 
   FileText, CheckCircle, ArrowRight 
 } from 'lucide-react';
+import { useTemporalContext } from '../contexts/TemporalContext';
+import { useQuotaContext } from '../contexts/QuotaContext';
+import { getOrBuildAllocation } from '../services/quota/quotaAllocationService';
 
 export default function ProjectPages() {
   const { projectId } = useParams<{ projectId: string }>();
@@ -49,24 +52,49 @@ export default function ProjectPages() {
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 10;
 
+  const temporalCtx = useTemporalContext();
+  const quotaCtx = useQuotaContext();
+
   // اجرای پروسسور صف با حل Race Condition بر پایه استعلام بهینه وضعیت تغییرات صف
   useEffect(() => {
+    let active = true;
     if ((queueStatus === 'processing' || queueStatus === 'pending') && !processingRef.current) {
       processingRef.current = true;
       setIsProcessing(true);
-      processQueue(id)
-        .catch((err) => {
+
+      const runProcess = async () => {
+        try {
+          const temporalEvents = temporalCtx.globalEnabled ? temporalCtx.getAllActiveEvents() : undefined;
+          
+          let quotaAllocation = undefined;
+          if (quotaCtx.globalEnabled && quotaCtx.rows.length > 0) {
+            quotaAllocation = await getOrBuildAllocation(id, quotaCtx.getSettings());
+          }
+
+          if (active) {
+            await processQueue(id, { temporalEvents, quotaAllocation });
+          }
+        } catch (err: any) {
           console.error(err);
-          showToast({ type: 'error', message: err.message || 'خطا در اجرای تحلیل هوشمند رخ داد' });
-        })
-        .finally(() => {
+          if (active) {
+            showToast({ type: 'error', message: err?.message || 'خطا در اجرای تحلیل هوشمند رخ داد' });
+          }
+        } finally {
           processingRef.current = false;
-          setIsProcessing(false);
-        });
+          if (active) {
+            setIsProcessing(false);
+          }
+        }
+      };
+
+      runProcess();
     } else if (queueStatus !== 'processing' && queueStatus !== 'pending') {
       setIsProcessing(false);
     }
-  }, [queueStatus, id, showToast]);
+    return () => {
+      active = false;
+    };
+  }, [queueStatus, id, showToast, temporalCtx, quotaCtx]);
 
   const results = useLiveQuery(() => resultRepository.listByProject(id), [id]);
 
