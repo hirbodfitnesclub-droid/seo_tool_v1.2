@@ -1,47 +1,50 @@
-import React, { InputHTMLAttributes } from 'react';
+import React from 'react';
 
-interface InputProps extends InputHTMLAttributes<HTMLInputElement> {
+interface InputProps extends React.InputHTMLAttributes<HTMLInputElement> {
+  id: string;
   label?: string;
-  error?: string;
-  helperText?: string;
-  className?: string; // Explicitly declared
-  id?: string; // Explicitly declared
-  disabled?: boolean; // Explicitly declared
+  error?: string | null;
+  icon?: React.ReactNode;
 }
 
-export default function Input({
+export const Input: React.FC<InputProps> = ({
+  id,
   label,
   error,
-  helperText,
+  icon,
   className = '',
-  id,
-  disabled,
   ...props
-}: InputProps) {
-  const inputId = id || `input-${Math.random().toString(36).substring(2, 9)}`;
-
+}) => {
   return (
-    <div className="w-full flex flex-col items-start gap-1">
+    <div id={`${id}-wrapper`} className="flex flex-col space-y-1.5 w-full">
       {label && (
-        <label htmlFor={inputId} className="text-sm font-medium text-gray-700 mb-1">
+        <label id={`${id}-label`} htmlFor={id} className="text-xs font-semibold text-slate-300">
           {label}
         </label>
       )}
-      
-      <input
-        id={inputId}
-        disabled={disabled}
-        className={`w-full px-4 py-3 rounded-xl border bg-white text-gray-900 border-gray-200 text-sm focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 focus:outline-hidden transition-all ${
-          error ? 'border-red-300 focus:ring-red-500/20 focus:border-red-500' : ''
-        } ${disabled ? 'bg-gray-50 text-gray-400 cursor-not-allowed border-gray-200' : ''} ${className}`}
-        {...props}
-      />
-
-      {error ? (
-        <p className="text-xs text-red-600 mt-1">{error}</p>
-      ) : helperText ? (
-        <p className="text-xs text-gray-500 mt-1">{helperText}</p>
-      ) : null}
+      <div id={`${id}-box`} className="relative flex items-center">
+        {icon && (
+          <div id={`${id}-icon-prefix`} className="pointer-events-none absolute right-3 text-slate-400">
+            {icon}
+          </div>
+        )}
+        <input
+          id={id}
+          className={`w-full bg-slate-950 border text-slate-100 placeholder-slate-500 rounded-xl px-4 py-2 text-sm transition-all focus:outline-none focus:ring-1 focus:ring-brand-500/80 ${
+            icon ? 'pr-10' : ''
+          } ${
+            error 
+              ? 'border-rose-500/50 focus:border-rose-500' 
+              : 'border-slate-800 focus:border-brand-500 hover:border-slate-700'
+          } ${className}`}
+          {...props}
+        />
+      </div>
+      {error && (
+        <p id={`${id}-error-msg`} className="text-xs text-rose-400 font-medium leading-normal">
+          {error}
+        </p>
+      )}
     </div>
   );
-}
+};

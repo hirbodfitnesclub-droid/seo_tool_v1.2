@@ -1,41 +1,53 @@
-
 import React from 'react';
 
 interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: 'primary' | 'secondary' | 'danger' | 'outline';
-  loading?: boolean;
-  children: React.ReactNode;
+  id: string;
+  variant?: 'primary' | 'secondary' | 'danger' | 'ghost' | 'success';
+  size?: 'sm' | 'md' | 'lg';
+  isLoading?: boolean;
+  icon?: React.ReactNode;
 }
 
-export const Button: React.FC<ButtonProps> = ({ 
-  variant = 'primary', 
-  loading = false, 
-  children, 
-  className = '', 
-  ...props 
+export const Button: React.FC<ButtonProps> = ({
+  id,
+  children,
+  variant = 'primary',
+  size = 'md',
+  isLoading = false,
+  icon,
+  className = '',
+  disabled,
+  ...props
 }) => {
-  const baseStyles = 'px-4 py-2 rounded-lg font-medium transition-all duration-200 flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed';
+  const baseClasses = 'inline-flex items-center justify-center font-semibold rounded-xl transition-all duration-200 outline-none active:scale-98 disabled:opacity-50 disabled:pointer-events-none cursor-pointer';
   
-  const variants = {
-    primary: 'bg-blue-600 text-white hover:bg-blue-700 shadow-sm active:scale-95',
-    secondary: 'bg-gray-100 text-gray-700 hover:bg-gray-200 active:scale-95',
-    danger: 'bg-red-50 text-red-600 hover:bg-red-100 border border-red-100 active:scale-95',
-    outline: 'border border-gray-300 text-gray-700 hover:bg-gray-50 active:scale-95'
+  const variantClasses = {
+    primary: 'bg-brand-500 hover:bg-brand-600 text-white shadow-lg shadow-brand-500/10 hover:shadow-brand-500/25 border border-brand-400/20',
+    secondary: 'bg-slate-800 hover:bg-slate-700 text-slate-100 hover:text-white border border-slate-700/80',
+    danger: 'bg-rose-600 hover:bg-rose-700 text-white shadow-lg shadow-rose-600/10 border border-rose-500/20',
+    success: 'bg-emerald-600 hover:bg-emerald-700 text-white border border-emerald-500/20',
+    ghost: 'hover:bg-slate-800 text-slate-400 hover:text-white',
+  };
+
+  const sizeClasses = {
+    sm: 'px-3 py-1.5 text-xs space-x-1 space-x-reverse',
+    md: 'px-4 py-2 text-sm space-x-2 space-x-reverse min-h-[40px]',
+    lg: 'px-6 py-3 text-base space-x-3 space-x-reverse min-h-[48px]',
   };
 
   return (
-    <button 
-      className={`${baseStyles} ${variants[variant]} ${className}`}
-      disabled={loading || props.disabled}
+    <button
+      id={id}
+      disabled={disabled || isLoading}
+      className={`${baseClasses} ${variantClasses[variant]} ${sizeClasses[size]} ${className}`}
       {...props}
     >
-      {loading && (
-        <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
-          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-        </svg>
-      )}
-      {children}
+      {isLoading ? (
+        <span id={`${id}-spinner`} className="w-4 h-4 border-2 border-slate-300 border-t-transparent rounded-full animate-spin ml-2" />
+      ) : icon ? (
+        <span id={`${id}-icon-wrapper`} className="ml-1.5 flex items-center">{icon}</span>
+      ) : null}
+      <span id={`${id}-text`}>{children}</span>
     </button>
   );
 };

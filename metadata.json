@@ -1,6 +1,6 @@
 {
-  "name": "LinkMesh v1.73",
-  "description": "ابزار لینکسازی داخلی هوشمند برای SEO بر اساس شباهت معنایی",
+  "name": "Hexer Admin Dashboard 2.0",
+  "description": "پنل مدیریت اختصاصی، لوکس و راست‌چین پلتفرم هکسر برای مدیریت کاربران، اشتراک‌ها، پرداخت‌ها و کدهای تخفیف",
   "requestFramePermissions": [],
   "majorCapabilities": [
     "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"

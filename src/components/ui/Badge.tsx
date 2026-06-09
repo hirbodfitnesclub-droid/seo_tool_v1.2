@@ -1,25 +1,27 @@
-
 import React from 'react';
+
+type BadgeVariant = 'success' | 'warning' | 'danger' | 'info' | 'neutral';
 
 interface BadgeProps {
   children: React.ReactNode;
-  variant?: 'blue' | 'gray' | 'green' | 'red' | 'amber';
-  className?: string;
+  variant?: BadgeVariant;
 }
 
-export const Badge: React.FC<BadgeProps> = ({ children, variant = 'blue', className = '' }) => {
-  const variants = {
-    blue: 'bg-blue-50 text-blue-700 border-blue-100',
-    gray: 'bg-gray-100 text-gray-700 border-gray-200',
-    green: 'bg-green-50 text-green-700 border-green-100',
-    red: 'bg-red-50 text-red-600 border-red-100',
-    amber: 'bg-amber-50 text-amber-700 border-amber-200',
+export const Badge: React.FC<BadgeProps> = ({
+  children,
+  variant = 'neutral',
+}) => {
+  const variantStyles: Record<BadgeVariant, string> = {
+    success: 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20',
+    warning: 'bg-amber-500/10 text-amber-400 border border-amber-500/20',
+    danger: 'bg-rose-500/10 text-rose-400 border border-rose-500/20',
+    info: 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20',
+    neutral: 'bg-slate-800 text-slate-400 border border-slate-700',
   };
 
   return (
-    <span className={`px-2.5 py-0.5 rounded-full text-xs font-semibold border ${variants[variant]} ${className}`}>
+    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold select-none ${variantStyles[variant]}`}>
       {children}
     </span>
   );
 };
-
